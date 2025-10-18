@@ -37,6 +37,9 @@ local.sbt
 # VS Code
 .vscode/
 
+# GitHub Copilot instructions (local only)
+.github/copilot-instructions.md
+
 # Metals
 .bloop/
 .metals/
