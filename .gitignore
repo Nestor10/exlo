@@ -1,0 +1,80 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# sbt specific
+dist/*
+target/
+lib_managed/
+src_managed/
+project/boot/
+project/plugins/project/
+project/local-plugins.sbt
+.history
+.ensime
+.ensime_cache/
+.sbt-scripted/
+local.sbt
+
+# Bloop
+.bsp
+
+# VS Code
+.vscode/
+
+# Metals
+.bloop/
+.metals/
+metals.sbt
+
+# IDEA
+.idea
+.idea_modules
+/.worksheet/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Docker
+*.dockerignore
+docker-compose.override.yml
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.swp
+*.swo
+*~
+.tmp/
+tmp/
+
+# Scala compiled files
+*.class
+
+# Virtual machine crash logs
+hs_err_pid*
+
+context/
