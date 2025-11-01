@@ -1,12 +1,13 @@
 package exlo.integration
 
-import exlo.domain.DataFile
 import exlo.domain.ExloError
-import exlo.domain.PipelineElement
+import exlo.domain.StateConfig
 import exlo.domain.StreamElement
 import exlo.domain.SyncMetadata
-import exlo.pipeline.StreamProcessor
-import exlo.service.*
+import exlo.infra.IcebergCatalog
+import exlo.pipeline.PipelineOrchestrator
+import exlo.service.Connector
+import exlo.service.Table
 import zio.*
 import zio.stream.*
 import zio.test.*
@@ -15,14 +16,14 @@ import zio.test.Assertion.*
 import java.util.UUID
 
 /**
- * Integration tests for the file-based checkpoint grouping pipeline.
+ * Integration tests for the complete EXLO pipeline.
  *
- * These tests verify the MVP architecture where:
- * 1. Records are written to Parquet files via RecordWriter.Stub
- * 2. File paths accumulate in memory (tiny footprint)
- * 3. Checkpoints trigger Iceberg commits of accumulated files
- *
- * Key insight: We accumulate file PATHS, not records (memory-efficient).
+ * Tests verify the end-to-end flow using PipelineOrchestrator:
+ * 1. Read state from table (or fresh start)
+ * 2. Extract data from connector
+ * 3. Batch records and wrap with metadata
+ * 4. Append records to table
+ * 5. Commit atomically when checkpoint arrives
  */
 object StreamProcessingSpec extends ZIOSpecDefault:
 
@@ -32,115 +33,149 @@ object StreamProcessingSpec extends ZIOSpecDefault:
     connectorVersion = "1.0.0-test"
   )
 
-  def spec = suite("Stream Processing Pipeline")(
-    test("groups data files between checkpoints") {
+  val testStateConfig = StateConfig(version = 1L)
+
+  def spec = suite("Pipeline Integration")(
+    test("processes connector stream and commits at checkpoints") {
       // BEHAVIOR:
-      // Stream: Data, Data, Checkpoint, Data, Checkpoint
-      // Files written: file1 (2 records), file2 (1 record)
-      // Batches: [file1] with state "page_2", [file2] with state "page_3"
+      // Connector emits: Data, Data, Checkpoint, Data, Checkpoint
+      // Pipeline batches records, appends to table, commits at each checkpoint
 
       for
-        connector    <- ZIO.service[Connector]
-        recordWriter <- ZIO.service[RecordWriter]
-        batches      <- connector
-          .extract("")
-          .via(
-            recordWriter
-              .writeFiles(testSyncMetadata, "test-connector", "1.0.0", maxRecordsPerFile = 10, maxDuration = 1.minute)
-          )
-          .via(StreamProcessor.groupByCheckpoint)
-          .runCollect
+        table <- ZIO.service[Table]
+
+        // Run the pipeline
+        _ <- PipelineOrchestrator.run(
+          namespace = "test",
+          tableName = "table",
+          stateVersion = 1L,
+          syncMetadata = testSyncMetadata
+        )
+
+        // Verify results
+        stub = table.asInstanceOf[Table.Stub]
       yield assertTrue(
-        batches.size == 2,
-        batches(0)._1.size == 1,                    // First batch has 1 file (2 records)
-        batches(0)._1(0).recordCount == 2,
-        batches(0)._2 == """{"cursor":"page_2"}""", // First checkpoint state
-        batches(1)._1.size == 1,                    // Second batch has 1 file (1 record)
-        batches(1)._1(0).recordCount == 1,
-        batches(1)._2 == """{"cursor":"page_3"}"""  // Second checkpoint state
-      )
-    }.provide(StubConnector.layer, RecordWriter.Stub.layer),
-    test("checkpoint advances state with file commits") {
-      // BEHAVIOR:
-      // Files are accumulated as paths, checkpoint triggers "commit"
-      // State advances only after files are logged
-
-      for
-        connector    <- ZIO.service[Connector]
-        recordWriter <- ZIO.service[RecordWriter]
-        stateWriter  <- ZIO.service[StateWriter]
-
-        // Process stream: write files, group by checkpoint, log state
-        _ <- connector
-          .extract("")
-          .via(
-            recordWriter
-              .writeFiles(testSyncMetadata, "test-connector", "1.0.0", maxRecordsPerFile = 10, maxDuration = 1.minute)
-          )
-          .via(StreamProcessor.groupByCheckpoint)
-          .mapZIO {
-            case (files, state) =>
-              // In production: Iceberg commit with file paths
-              // In test: just log the state
-              val totalRecords = files.map(_.recordCount).sum
-              StateWriter
-                .writeState("test", "table", 1L, Chunk.empty, state)
-                .as(totalRecords)
-          }
-          .runSum
-
-        // Verify final state
-        stub = stateWriter.asInstanceOf[StateWriter.Stub]
-      yield assertTrue(
-        stub.lastState == """{"cursor":"page_3"}""" // Final checkpoint
+        stub.commitCount == 2,                       // Two checkpoints = two commits
+        stub.lastState == """{"cursor":"page_3"}""", // Final checkpoint state
+        stub.writtenFiles.size == 2                  // Two batches written
       )
     }.provide(
       StubConnector.layer,
-      RecordWriter.Stub.layer,
-      StateWriter.Stub.layer
+      Table.Stub.layer,
+      IcebergCatalog.Stub.layer,
+      ZLayer.succeed(testStateConfig)
     ),
-    test("empty stream produces no file batches") {
+    test("empty stream produces no commits") {
       // Edge case: connector emits no elements
-      val emptyConnector = new Connector {
+      for
+        table <- ZIO.service[Table]
+
+        _ <- PipelineOrchestrator.run(
+          namespace = "test",
+          tableName = "empty",
+          stateVersion = 1L,
+          syncMetadata = testSyncMetadata
+        )
+
+        stub = table.asInstanceOf[Table.Stub]
+      yield assertTrue(
+        stub.commitCount == 0,    // No checkpoints = no commits
+        stub.writtenFiles.isEmpty // No data written
+      )
+    }.provide(
+      ZLayer.succeed[Connector](new Connector {
         def connectorId            = "empty"
         def extract(state: String) = ZStream.empty
-      }
-
-      for
-        recordWriter <- ZIO.service[RecordWriter]
-        batches      <- emptyConnector
-          .extract("")
-          .via(
-            recordWriter.writeFiles(testSyncMetadata, "empty", "1.0.0", maxRecordsPerFile = 10, maxDuration = 1.minute)
-          )
-          .via(StreamProcessor.groupByCheckpoint)
-          .runCollect
-      yield assertTrue(batches.isEmpty)
-    }.provide(RecordWriter.Stub.layer),
-    test("stream with only data (no checkpoints) produces no file batches") {
+      }),
+      Table.Stub.layer,
+      IcebergCatalog.Stub.layer,
+      ZLayer.succeed(testStateConfig)
+    ),
+    test("stream with only data (no checkpoints) produces no commits") {
       // Edge case: user forgets to emit checkpoints
-      // Files get written but never committed (no checkpoint to trigger)
-      // This documents current behavior - might want to fail loudly instead
-      val noCheckpointConnector = new Connector {
+      // Records are appended but never committed (no checkpoint to trigger)
+      for
+        table <- ZIO.service[Table]
+
+        _ <- PipelineOrchestrator.run(
+          namespace = "test",
+          tableName = "no_checkpoint",
+          stateVersion = 1L,
+          syncMetadata = testSyncMetadata
+        )
+
+        stub = table.asInstanceOf[Table.Stub]
+      yield assertTrue(
+        stub.commitCount == 0,    // No checkpoint = no commit
+        stub.writtenFiles.isEmpty // No batches emitted without checkpoint
+      )
+    }.provide(
+      ZLayer.succeed[Connector](new Connector {
         def connectorId            = "no-checkpoint"
         def extract(state: String) = ZStream(
           StreamElement.Data("record1"),
           StreamElement.Data("record2")
         )
-      }
-
+      }),
+      Table.Stub.layer,
+      IcebergCatalog.Stub.layer,
+      ZLayer.succeed(testStateConfig)
+    ),
+    test("reads initial state and passes to connector") {
+      // Verify that pipeline reads state from table and passes to connector
       for
-        recordWriter <- ZIO.service[RecordWriter]
-        batches      <- noCheckpointConnector
-          .extract("")
-          .via(
-            recordWriter
-              .writeFiles(testSyncMetadata, "no-checkpoint", "1.0.0", maxRecordsPerFile = 10, maxDuration = 1.minute)
+        stateRef <- Ref.make[Option[String]](None)
+
+        _ <- PipelineOrchestrator
+          .run(
+            namespace = "test",
+            tableName = "state_test",
+            stateVersion = 1L,
+            syncMetadata = testSyncMetadata
           )
-          .via(StreamProcessor.groupByCheckpoint)
-          .runCollect
+          .provide(
+            ZLayer.fromZIO(ZIO.succeed[Connector](new Connector {
+              def connectorId            = "state-tracker"
+              def extract(state: String) = {
+                ZStream.fromZIO(stateRef.set(Some(state))) *>
+                  ZStream(
+                    StreamElement.Data("record1"),
+                    StreamElement.Checkpoint("""{"cursor":"next"}""")
+                  )
+              }
+            })),
+            ZLayer.succeed[Table](
+              Table.Stub(
+                currentState = """{"cursor":"previous"}""",
+                currentStateVersion = 1L
+              )
+            ),
+            IcebergCatalog.Stub.layer,
+            ZLayer.succeed(testStateConfig)
+          )
+
+        capturedState <- stateRef.get
       yield assertTrue(
-        batches.isEmpty // No checkpoint = files written but not committed
+        capturedState.contains("""{"cursor":"previous"}""")
       )
-    }.provide(RecordWriter.Stub.layer)
+    }
   )
+
+/** Stub connector for testing - emits static test data. */
+case class StubConnector() extends Connector:
+
+  def connectorId: String = "stub.test"
+
+  def extract(state: String): ZStream[Any, ExloError, exlo.domain.StreamElement] =
+    ZStream(
+      exlo.domain.StreamElement.Data("""{"id":1,"name":"Alice"}"""),
+      exlo.domain.StreamElement.Data("""{"id":2,"name":"Bob"}"""),
+      exlo.domain.StreamElement.Checkpoint("""{"cursor":"page_2"}"""),
+      exlo.domain.StreamElement.Data("""{"id":3,"name":"Charlie"}"""),
+      exlo.domain.StreamElement.Checkpoint("""{"cursor":"page_3"}""")
+    )
+
+object StubConnector:
+
+  val layer: ZLayer[Any, Nothing, Connector] =
+    ZLayer.succeed(StubConnector())
