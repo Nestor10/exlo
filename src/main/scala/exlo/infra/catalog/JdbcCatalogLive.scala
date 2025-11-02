@@ -1,14 +1,16 @@
 package exlo.infra.catalog
 
 import exlo.domain.*
-import exlo.infra.{FileAppender, IcebergCatalog}
+import exlo.infra.FileAppender
+import exlo.infra.IcebergCatalog
 import org.apache.iceberg.catalog.Catalog
-import scala.jdk.CollectionConverters.*
 import zio.*
+
+import scala.jdk.CollectionConverters.*
 
 /**
  * JDBC catalog implementation for IcebergCatalog.
- * 
+ *
  * JDBC catalog stores Iceberg metadata in a relational database (Postgres, MySQL, etc.).
  * Good for environments without Hive or cloud-managed catalogs.
  */
@@ -21,16 +23,17 @@ object JdbcCatalogLive:
     namespace: String,
     tableName: String,
     warehouse: String,
-    config: JdbcConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Jdbc
   ): Task[IcebergCatalog] =
     for {
-      catalog <- initJdbcCatalog(warehouse, config)
+      jdbcCatalog <- initJdbcCatalog(warehouse, storage, catalog)
       appenderRef <- Ref.make[Option[FileAppender]](None)
-    } yield Live(namespace, tableName, catalog, appenderRef)
+    } yield Live(namespace, tableName, jdbcCatalog, appenderRef)
 
   /**
    * Initialize a JDBC catalog using reflection.
-   * 
+   *
    * Once we add iceberg-jdbc dependency, this becomes:
    * {{{
    * val catalog = new JdbcCatalog()
@@ -39,22 +42,26 @@ object JdbcCatalogLive:
    */
   private def initJdbcCatalog(
     warehouse: String,
-    config: JdbcConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Jdbc
   ): Task[Catalog] =
     ZIO.attempt {
       val catalogClass = Class.forName("org.apache.iceberg.jdbc.JdbcCatalog")
-      val catalog = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
-      
-      val props = Map(
-        "warehouse" -> warehouse,
-        "uri" -> config.uri,
-        "jdbc.user" -> config.username,
-        "jdbc.password" -> config.password
-      ) ++ config.properties
-      
+      val jdbcCatalog  = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
+
+      val storageProps = storage.toIcebergProperties
+      val catalogProps = Map(
+        "warehouse"     -> warehouse,
+        "uri"           -> catalog.uri,
+        "jdbc.user"     -> catalog.username,
+        "jdbc.password" -> catalog.password
+      )
+
+      val allProps = storageProps ++ catalogProps
+
       val initMethod = catalogClass.getMethod("initialize", classOf[String], classOf[java.util.Map[String, String]])
-      initMethod.invoke(catalog, "jdbc", props.asJava)
-      catalog
+      initMethod.invoke(jdbcCatalog, "jdbc", allProps.asJava)
+      jdbcCatalog
     }
 
   private case class Live(
@@ -76,8 +83,17 @@ object JdbcCatalogLive:
     def readSnapshotSummary(namespace: String, tableName: String): IO[ExloError, Map[String, String]] =
       ZIO.fail(ExloError.StateReadError(new NotImplementedError("JDBC implementation pending")))
 
-    def writeAndStageRecords(namespace: String, tableName: String, records: Chunk[ExloRecord]): IO[ExloError, DataFile] =
+    def writeAndStageRecords(
+      namespace: String,
+      tableName: String,
+      records: Chunk[ExloRecord]
+    ): IO[ExloError, DataFile] =
       ZIO.fail(ExloError.IcebergWriteError(new NotImplementedError("JDBC implementation pending")))
 
-    def commitTransaction(namespace: String, tableName: String, state: String, stateVersion: Long): IO[ExloError, Unit] =
+    def commitTransaction(
+      namespace: String,
+      tableName: String,
+      state: String,
+      stateVersion: Long
+    ): IO[ExloError, Unit] =
       ZIO.fail(ExloError.IcebergWriteError(new NotImplementedError("JDBC implementation pending")))

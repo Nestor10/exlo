@@ -23,12 +23,13 @@ object HiveCatalogLive:
     namespace: String,
     tableName: String,
     warehouse: String,
-    config: HiveConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Hive
   ): Task[IcebergCatalog] =
     for {
-      catalog     <- initHiveCatalog(warehouse, config)
+      hiveCatalog <- initHiveCatalog(warehouse, storage, catalog)
       appenderRef <- Ref.make[Option[FileAppender]](None)
-    } yield Live(namespace, tableName, catalog, appenderRef)
+    } yield Live(namespace, tableName, hiveCatalog, appenderRef)
 
   /**
    * Initialize a Hive catalog using reflection.
@@ -41,20 +42,24 @@ object HiveCatalogLive:
    */
   private def initHiveCatalog(
     warehouse: String,
-    config: HiveConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Hive
   ): Task[Catalog] =
     ZIO.attempt {
       val catalogClass = Class.forName("org.apache.iceberg.hive.HiveCatalog")
-      val catalog      = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
+      val hiveCatalog  = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
 
-      val props = Map(
+      val storageProps = storage.toIcebergProperties
+      val catalogProps = Map(
         "warehouse" -> warehouse,
-        "uri"       -> config.uri
-      ) ++ config.properties
+        "uri"       -> catalog.uri
+      )
+
+      val allProps = storageProps ++ catalogProps
 
       val initMethod = catalogClass.getMethod("initialize", classOf[String], classOf[java.util.Map[String, String]])
-      initMethod.invoke(catalog, "hive", props.asJava)
-      catalog
+      initMethod.invoke(hiveCatalog, "hive", allProps.asJava)
+      hiveCatalog
     }
 
   private case class Live(

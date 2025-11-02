@@ -49,24 +49,20 @@ object NessieTestContainer:
         // Create test bucket in MinIO
         _ <- createBucket(minio, "test-bucket", accessKey, secretKey)
 
-        // Create StorageConfig pointing to test containers
+        // Create StorageConfig with separated storage and catalog
         config = StorageConfig(
           warehousePath = "s3://test-bucket/warehouse",
-          nessie = Some(
-            NessieConfig(
-              uri = nessieUri,
-              defaultBranch = "main",
-              authToken = None,
-              properties = Map(
-                // Iceberg S3FileIO configuration
-                "io-impl"              -> "org.apache.iceberg.aws.s3.S3FileIO",
-                "s3.endpoint"          -> minioEndpoint,
-                "s3.access-key-id"     -> accessKey,
-                "s3.secret-access-key" -> secretKey,
-                "s3.path-style-access" -> "true",
-                "client.region"        -> "us-east-1" // MinIO doesn't care about region but S3FileIO requires it
-              )
-            )
+          storage = StorageBackend.S3(
+            region = "us-east-1",
+            endpoint = Some(minioEndpoint),
+            accessKeyId = Some(accessKey),
+            secretAccessKey = Some(secretKey),
+            pathStyleAccess = true
+          ),
+          catalog = CatalogConfig.Nessie(
+            uri = nessieUri,
+            branch = "main",
+            authToken = None
           )
         )
 

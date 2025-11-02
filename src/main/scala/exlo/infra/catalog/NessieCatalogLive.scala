@@ -15,10 +15,10 @@ import org.apache.iceberg.io.DataWriter
 import org.apache.iceberg.io.OutputFile
 import org.apache.iceberg.nessie.NessieCatalog
 import org.apache.iceberg.parquet.Parquet
+import org.apache.parquet.schema.MessageType
 import zio.*
 
 import java.io.File
-import java.nio.ByteBuffer
 import java.util.UUID as JUUID
 import scala.jdk.CollectionConverters.*
 
@@ -51,71 +51,64 @@ object NessieCatalogLive:
    * @param namespace Iceberg namespace
    * @param tableName Iceberg table name
    * @param warehouse Base path for Iceberg warehouse (e.g., "s3://bucket/warehouse")
-   * @param config Nessie configuration including URI, branch, and cloud credentials
+   * @param storage Storage backend configuration (S3, GCS, Azure, etc.)
+   * @param catalog Nessie catalog configuration (URI, branch, auth)
    * @return ZIO effect that produces an IcebergCatalog implementation
    */
   def make(
     namespace: String,
     tableName: String,
     warehouse: String,
-    config: NessieConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Nessie
   ): Task[IcebergCatalog] =
     for {
-      // Initialize Nessie catalog
-      catalog <- initNessieCatalog(warehouse, config)
+      // Initialize Nessie catalog with merged storage + catalog properties
+      nessieCatalog <- initNessieCatalog(warehouse, storage, catalog)
 
       // Create file appender ref for this table
       appenderRef <- Ref.make[Option[FileAppender]](None)
 
-    } yield Live(namespace, tableName, catalog, appenderRef)
-
-  /**
-   * Convert UUID to byte array (16 bytes) for Iceberg's UUID type.
-   * Iceberg's UUID type uses fixed[16] which requires byte arrays.
-   */
-  private def uuidToBytes(uuid: JUUID): Array[Byte] = {
-    val buffer = ByteBuffer.wrap(new Array[Byte](16))
-    buffer.putLong(uuid.getMostSignificantBits)
-    buffer.putLong(uuid.getLeastSignificantBits)
-    buffer.array()
-  }
+    } yield Live(namespace, tableName, nessieCatalog, appenderRef)
 
   /**
    * Initialize a Nessie catalog.
    *
-   * Using S3FileIO (iceberg-aws) which directly uses AWS SDK v2.
-   * This bypasses Hadoop entirely for better performance and simpler configuration.
+   * Combines storage backend properties with Nessie catalog properties.
+   * Storage backend determines FileIO implementation (S3FileIO, GcsFileIO, etc.).
    *
    * @param warehouse Base path for Iceberg warehouse
-   * @param config Nessie configuration (must include io-impl and S3/GCS/Azure credentials)
+   * @param storage Storage backend configuration (generates FileIO properties)
+   * @param catalog Nessie catalog configuration (URI, branch, auth)
    * @return Initialized Nessie catalog
    */
   private def initNessieCatalog(
     warehouse: String,
-    config: NessieConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Nessie
   ): Task[Catalog] =
     ZIO.attempt {
-      val catalog = new NessieCatalog()
+      val nessieCatalog = new NessieCatalog()
 
-      // Build properties map: core Nessie config + user-provided properties
-      // Properties should include:
-      // - "io-impl" -> "org.apache.iceberg.aws.s3.S3FileIO" (or GcsFileIO, etc.)
-      // - Cloud-specific credentials (s3.access-key-id, gcs.project-id, etc.)
-      val props = Map(
-        "uri"       -> config.uri,
+      // Merge storage backend properties with Nessie catalog properties
+      val storageProps = storage.toIcebergProperties
+      val catalogProps = Map(
+        "uri"       -> catalog.uri,
         "warehouse" -> warehouse,
-        "ref"       -> config.defaultBranch
-      ) ++ config.properties
+        "ref"       -> catalog.branch
+      )
 
       // Add auth token if provided
-      val propsWithAuth = config.authToken match {
+      val authProps = catalog.authToken match {
         case Some(token) =>
-          props ++ Map("authentication.type" -> "BEARER", "authentication.token" -> token)
-        case None        => props
+          Map("authentication.type" -> "BEARER", "authentication.token" -> token)
+        case None        => Map.empty[String, String]
       }
 
-      catalog.initialize("nessie", propsWithAuth.asJava)
-      catalog
+      val allProps = storageProps ++ catalogProps ++ authProps
+
+      nessieCatalog.initialize("nessie", allProps.asJava)
+      nessieCatalog
     }
 
   /**
@@ -229,10 +222,11 @@ object NessieCatalogLive:
           val outputFile: OutputFile = Files.localOutput(filePath)
 
           // Create Parquet writer using Iceberg's GenericParquetWriter
+          // In Iceberg 1.10.0+, buildWriter was renamed to create() and takes (Schema, MessageType)
           val dataWriter: DataWriter[GenericRecord] = Parquet
             .writeData(outputFile)
             .schema(schema)
-            .createWriterFunc(GenericParquetWriter.buildWriter)
+            .createWriterFunc((msgType: MessageType) => GenericParquetWriter.create(schema, msgType))
             .overwrite()
             .withSpec(PartitionSpec.unpartitioned())
             .build()
@@ -241,9 +235,8 @@ object NessieCatalogLive:
             // Convert ExloRecords to GenericRecords and write
             val genericRecord = GenericRecord.create(schema)
             records.foreach { exloRecord =>
-              // Convert UUIDs to byte arrays (Iceberg's UUID type uses fixed[16])
-              val commitIdBytes = uuidToBytes(exloRecord.commitId)
-              val syncIdBytes   = uuidToBytes(exloRecord.syncId)
+              // In Iceberg 1.10.0+, UUIDType expects java.util.UUID objects directly
+              // No need to convert to byte arrays anymore
 
               // Convert Instant to OffsetDateTime for Iceberg's timestamp with timezone
               val committedAtOdt = java.time.OffsetDateTime.ofInstant(exloRecord.committedAt, java.time.ZoneOffset.UTC)
@@ -251,9 +244,9 @@ object NessieCatalogLive:
 
               val rec = genericRecord.copy(
                 Map(
-                  "commit_id"             -> commitIdBytes,
+                  "commit_id"             -> exloRecord.commitId,    // Direct UUID in 1.10.0+
                   "connector_id"          -> exloRecord.connectorId, // String, not UUID
-                  "sync_id"               -> syncIdBytes,
+                  "sync_id"               -> exloRecord.syncId,      // Direct UUID in 1.10.0+
                   "committed_at"          -> committedAtOdt,
                   "recorded_at"           -> recordedAtOdt,
                   "connector_version"     -> exloRecord.connectorVersion,

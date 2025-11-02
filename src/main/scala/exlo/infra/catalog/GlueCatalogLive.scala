@@ -26,12 +26,13 @@ object GlueCatalogLive:
     namespace: String,
     tableName: String,
     warehouse: String,
-    config: GlueConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Glue
   ): Task[IcebergCatalog] =
     for {
-      catalog     <- initGlueCatalog(warehouse, config)
+      glueCatalog <- initGlueCatalog(warehouse, storage, catalog)
       appenderRef <- Ref.make[Option[FileAppender]](None)
-    } yield Live(namespace, tableName, catalog, appenderRef)
+    } yield Live(namespace, tableName, glueCatalog, appenderRef)
 
   /**
    * Initialize a Glue catalog using reflection.
@@ -44,21 +45,25 @@ object GlueCatalogLive:
    */
   private def initGlueCatalog(
     warehouse: String,
-    config: GlueConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Glue
   ): Task[Catalog] =
     ZIO.attempt {
       val catalogClass = Class.forName("org.apache.iceberg.aws.glue.GlueCatalog")
-      val catalog      = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
+      val glueCatalog  = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
 
-      val props = Map(
+      // Merge storage properties (should be S3) with Glue catalog properties
+      val storageProps = storage.toIcebergProperties
+      val catalogProps = Map(
         "warehouse"   -> warehouse,
-        "glue.region" -> config.region
-      ) ++ config.catalogId.map("glue.id" -> _).toMap ++
-        config.properties
+        "glue.region" -> catalog.region
+      ) ++ catalog.catalogId.map("glue.id" -> _).toMap
+
+      val allProps = storageProps ++ catalogProps
 
       val initMethod = catalogClass.getMethod("initialize", classOf[String], classOf[java.util.Map[String, String]])
-      initMethod.invoke(catalog, "glue", props.asJava)
-      catalog
+      initMethod.invoke(glueCatalog, "glue", allProps.asJava)
+      glueCatalog
     }
 
   private case class Live(

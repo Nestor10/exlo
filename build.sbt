@@ -1,8 +1,8 @@
 val scala3Version  = "3.7.3"
-val zioVersion     = "2.1.14"
-val icebergVersion = "1.7.0"
-val awsVersion     = "2.29.29"
-val nessieVersion  = "0.99.0"
+val zioVersion     = "2.1.22"
+val icebergVersion = "1.10.0"
+val awsVersion     = "2.37.2"
+val nessieVersion  = "0.105.6"
 
 lazy val root = project
   .in(file("."))
@@ -21,11 +21,21 @@ lazy val root = project
       "org.apache.iceberg" % "iceberg-nessie"  % icebergVersion,
       "org.apache.iceberg" % "iceberg-aws"     % icebergVersion, // S3FileIO (bypasses Hadoop)
 
+      // AWS SDK v2 (required by iceberg-aws, not transitive)
+      "software.amazon.awssdk" % "s3"       % awsVersion,
+      "software.amazon.awssdk" % "glue"     % awsVersion,
+      "software.amazon.awssdk" % "dynamodb" % awsVersion,
+      "software.amazon.awssdk" % "kms"      % awsVersion,
+      "software.amazon.awssdk" % "sts"      % awsVersion,
+
       // Nessie Catalog
       "org.projectnessie.nessie" % "nessie-client" % nessieVersion,
 
       // Parquet (already included transitively, but explicit for clarity)
       "org.apache.parquet" % "parquet-avro" % "1.14.3",
+
+      // Hadoop (Parquet writer needs Configuration class)
+      "org.apache.hadoop" % "hadoop-common" % "3.4.1" % "runtime",
 
       // Testing
       "dev.zio"       %% "zio-test"     % zioVersion % Test,

@@ -32,50 +32,21 @@ object IcebergCatalogSelector:
       for {
         config <- ZIO.service[StorageConfig]
 
-        catalogType <- ZIO
-          .fromEither(config.catalogType)
-          .mapError(msg => new IllegalStateException(s"Invalid catalog configuration: $msg"))
+        catalog <- config.catalog match {
+          case nessie: CatalogConfig.Nessie =>
+            NessieCatalogLive.make(namespace, tableName, config.warehousePath, config.storage, nessie)
 
-        catalog <- catalogType match {
-          case CatalogType.Nessie =>
-            config.nessie match {
-              case Some(nessieConfig) =>
-                NessieCatalogLive.make(namespace, tableName, config.warehousePath, nessieConfig)
-              case None               =>
-                ZIO.fail(new IllegalStateException("Nessie catalog type selected but configuration missing"))
-            }
+          case glue: CatalogConfig.Glue =>
+            GlueCatalogLive.make(namespace, tableName, config.warehousePath, config.storage, glue)
 
-          case CatalogType.Glue =>
-            config.glue match {
-              case Some(glueConfig) =>
-                GlueCatalogLive.make(namespace, tableName, config.warehousePath, glueConfig)
-              case None             =>
-                ZIO.fail(new IllegalStateException("Glue catalog type selected but configuration missing"))
-            }
+          case hive: CatalogConfig.Hive =>
+            HiveCatalogLive.make(namespace, tableName, config.warehousePath, config.storage, hive)
 
-          case CatalogType.Hive =>
-            config.hive match {
-              case Some(hiveConfig) =>
-                HiveCatalogLive.make(namespace, tableName, config.warehousePath, hiveConfig)
-              case None             =>
-                ZIO.fail(new IllegalStateException("Hive catalog type selected but configuration missing"))
-            }
+          case jdbc: CatalogConfig.Jdbc =>
+            JdbcCatalogLive.make(namespace, tableName, config.warehousePath, config.storage, jdbc)
 
-          case CatalogType.JDBC =>
-            config.jdbc match {
-              case Some(jdbcConfig) =>
-                JdbcCatalogLive.make(namespace, tableName, config.warehousePath, jdbcConfig)
-              case None             =>
-                ZIO.fail(new IllegalStateException("JDBC catalog type selected but configuration missing"))
-            }
-
-          case CatalogType.Databricks =>
-            config.databricks match {
-              case Some(databricksConfig) =>
-                DatabricksCatalogLive.make(namespace, tableName, config.warehousePath, databricksConfig)
-              case None                   =>
-                ZIO.fail(new IllegalStateException("Databricks catalog type selected but configuration missing"))
-            }
+          case databricks: CatalogConfig.Databricks =>
+            DatabricksCatalogLive.make(namespace, tableName, config.warehousePath, config.storage, databricks)
         }
       } yield catalog
     }

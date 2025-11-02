@@ -1,14 +1,16 @@
 package exlo.infra.catalog
 
 import exlo.domain.*
-import exlo.infra.{FileAppender, IcebergCatalog}
+import exlo.infra.FileAppender
+import exlo.infra.IcebergCatalog
 import org.apache.iceberg.catalog.Catalog
-import scala.jdk.CollectionConverters.*
 import zio.*
+
+import scala.jdk.CollectionConverters.*
 
 /**
  * Databricks Unity Catalog implementation for IcebergCatalog.
- * 
+ *
  * Unity Catalog is Databricks' managed catalog service with built-in governance
  * and multi-cloud support. Best suited for Databricks environments.
  */
@@ -21,16 +23,17 @@ object DatabricksCatalogLive:
     namespace: String,
     tableName: String,
     warehouse: String,
-    config: DatabricksConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Databricks
   ): Task[IcebergCatalog] =
     for {
-      catalog <- initDatabricksCatalog(warehouse, config)
-      appenderRef <- Ref.make[Option[FileAppender]](None)
-    } yield Live(namespace, tableName, catalog, appenderRef)
+      databricksCatalog <- initDatabricksCatalog(warehouse, storage, catalog)
+      appenderRef       <- Ref.make[Option[FileAppender]](None)
+    } yield Live(namespace, tableName, databricksCatalog, appenderRef)
 
   /**
    * Initialize a Databricks catalog using reflection.
-   * 
+   *
    * Once we add iceberg-databricks dependency, this becomes:
    * {{{
    * val catalog = new DatabricksCatalog()
@@ -39,22 +42,25 @@ object DatabricksCatalogLive:
    */
   private def initDatabricksCatalog(
     warehouse: String,
-    config: DatabricksConfig
+    storage: StorageBackend,
+    catalog: CatalogConfig.Databricks
   ): Task[Catalog] =
     ZIO.attempt {
-      val catalogClass = Class.forName("org.apache.iceberg.databricks.DatabricksCatalog")
-      val catalog = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
-      
-      val props = Map(
-        "warehouse" -> warehouse,
-        "uri" -> config.uri,
-        "token" -> config.token,
-        "warehouse-id" -> config.warehouseId
-      ) ++ config.properties
-      
+      val catalogClass      = Class.forName("org.apache.iceberg.databricks.DatabricksCatalog")
+      val databricksCatalog = catalogClass.getDeclaredConstructor().newInstance().asInstanceOf[Catalog]
+
+      val storageProps = storage.toIcebergProperties
+      val catalogProps = Map(
+        "warehouse"    -> warehouse,
+        "uri"          -> catalog.workspace,
+        "catalog-name" -> catalog.catalogName
+      )
+
+      val allProps = storageProps ++ catalogProps
+
       val initMethod = catalogClass.getMethod("initialize", classOf[String], classOf[java.util.Map[String, String]])
-      initMethod.invoke(catalog, "databricks", props.asJava)
-      catalog
+      initMethod.invoke(databricksCatalog, "databricks", allProps.asJava)
+      databricksCatalog
     }
 
   private case class Live(
@@ -76,8 +82,17 @@ object DatabricksCatalogLive:
     def readSnapshotSummary(namespace: String, tableName: String): IO[ExloError, Map[String, String]] =
       ZIO.fail(ExloError.StateReadError(new NotImplementedError("Databricks implementation pending")))
 
-    def writeAndStageRecords(namespace: String, tableName: String, records: Chunk[ExloRecord]): IO[ExloError, DataFile] =
+    def writeAndStageRecords(
+      namespace: String,
+      tableName: String,
+      records: Chunk[ExloRecord]
+    ): IO[ExloError, DataFile] =
       ZIO.fail(ExloError.IcebergWriteError(new NotImplementedError("Databricks implementation pending")))
 
-    def commitTransaction(namespace: String, tableName: String, state: String, stateVersion: Long): IO[ExloError, Unit] =
+    def commitTransaction(
+      namespace: String,
+      tableName: String,
+      state: String,
+      stateVersion: Long
+    ): IO[ExloError, Unit] =
       ZIO.fail(ExloError.IcebergWriteError(new NotImplementedError("Databricks implementation pending")))
