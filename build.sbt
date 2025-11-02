@@ -19,13 +19,10 @@ lazy val root = project
       "org.apache.iceberg" % "iceberg-core"    % icebergVersion,
       "org.apache.iceberg" % "iceberg-parquet" % icebergVersion,
       "org.apache.iceberg" % "iceberg-nessie"  % icebergVersion,
+      "org.apache.iceberg" % "iceberg-aws"     % icebergVersion, // S3FileIO (bypasses Hadoop)
 
       // Nessie Catalog
       "org.projectnessie.nessie" % "nessie-client" % nessieVersion,
-
-      // AWS SDK for S3
-      "software.amazon.awssdk" % "s3"  % awsVersion,
-      "software.amazon.awssdk" % "sts" % awsVersion,
 
       // Parquet (already included transitively, but explicit for clarity)
       "org.apache.parquet" % "parquet-avro" % "1.14.3",
@@ -33,7 +30,12 @@ lazy val root = project
       // Testing
       "dev.zio"       %% "zio-test"     % zioVersion % Test,
       "dev.zio"       %% "zio-test-sbt" % zioVersion % Test,
-      "org.scalameta" %% "munit"        % "1.0.0"    % Test
+      "org.scalameta" %% "munit"        % "1.0.0"    % Test,
+
+      // Testcontainers for integration tests
+      "com.dimafeng"      %% "testcontainers-scala-core" % "0.41.4" % Test,
+      "org.testcontainers" % "testcontainers"            % "1.20.4" % Test,
+      "org.testcontainers" % "minio"                     % "1.20.4" % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )

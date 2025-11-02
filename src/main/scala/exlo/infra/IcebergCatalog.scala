@@ -1,9 +1,9 @@
 package exlo.infra
 
-import exlo.domain.DataFile
-import exlo.domain.ExloError
-import exlo.domain.ExloRecord
+import exlo.domain.*
 import org.apache.iceberg.AppendFiles
+import org.apache.iceberg.Schema
+import org.apache.iceberg.types.Types
 import zio.*
 
 /**
@@ -25,14 +25,14 @@ object FileAppender:
 
   /**
    * Wrap an Iceberg AppendFiles in the opaque type.
-   * Only used internally by IcebergCatalog.Live.
+   * Only used internally by catalog implementations.
    */
   private[infra] def apply(underlying: AppendFiles): FileAppender =
     underlying
 
   /**
    * Unwrap to get the underlying Iceberg AppendFiles builder.
-   * Only used internally by IcebergCatalog.Live.
+   * Only used internally by catalog implementations.
    */
   private[infra] def unwrap(appender: FileAppender): AppendFiles = appender
 
@@ -45,8 +45,13 @@ object FileAppender:
  * Application services (e.g., Table in exlo.service) depend on this infrastructure
  * service to implement their business logic.
  *
- * Abstracts over different catalog implementations (Nessie, Hive, REST, etc.)
- * using the standard trait + Live + Stub pattern.
+ * Abstracts over different catalog implementations (Nessie, Glue, Hive, JDBC, Databricks)
+ * using the standard trait + Live implementations + Stub pattern.
+ *
+ * Catalog Implementations:
+ * - Each catalog type has its own Live implementation in the catalog package
+ * - Use IcebergCatalogSelector.layer() for dynamic catalog selection based on StorageConfig
+ * - See: catalog.NessieCatalogLive, catalog.GlueCatalogLive, etc.
  *
  * Key Responsibilities:
  * - Catalog operations (table existence, creation, metadata access)
@@ -197,6 +202,29 @@ trait IcebergCatalog:
 object IcebergCatalog:
 
   /**
+   * Build the fixed Iceberg schema for ExloRecord.
+   *
+   * Uses unique field IDs for each column (Iceberg requirement).
+   * Iceberg tracks columns by ID, not name, enabling safe schema evolution.
+   *
+   * This schema is shared across all catalog implementations since ExloRecord
+   * structure is fixed by the framework.
+   */
+  private[infra] def buildExloSchema(): Schema =
+    new Schema(
+      Types.NestedField.required(1, "commit_id", Types.UUIDType.get()),
+      Types.NestedField.required(2, "connector_id", Types.StringType.get()),
+      Types.NestedField.required(3, "sync_id", Types.UUIDType.get()),
+      Types.NestedField.required(4, "committed_at", Types.TimestampType.withZone()),
+      Types.NestedField.required(5, "recorded_at", Types.TimestampType.withZone()),
+      Types.NestedField.required(6, "connector_version", Types.StringType.get()),
+      Types.NestedField.required(7, "connector_config_hash", Types.StringType.get()),
+      Types.NestedField.required(8, "stream_config_hash", Types.StringType.get()),
+      Types.NestedField.required(9, "state_version", Types.LongType.get()),
+      Types.NestedField.required(10, "payload", Types.StringType.get())
+    )
+
+  /**
    * Accessor for getTableLocation.
    *
    * Use: `IcebergCatalog.getTableLocation(namespace, tableName)`
@@ -267,158 +295,12 @@ object IcebergCatalog:
     ZIO.serviceWithZIO[IcebergCatalog](_.commitTransaction(namespace, tableName, state, stateVersion))
 
   /**
-   * Live implementation - connects to real Iceberg catalog.
+   * In-memory stub implementation for testing.
    *
-   * One IcebergCatalog.Live instance per Table (one connection = one table).
-   * This is the correct pattern as per EXLO architecture.
-   *
-   * Infrastructure dependencies (Phase 2):
-   * - StorageConfig for catalog URI and Nessie configuration
-   * - Iceberg Java SDK for catalog operations
-   * - Nessie client for version control
-   *
-   * File Appender Management:
-   * - Holds Ref[Option[FileAppender]] for this table's active append builder
-   * - Builder created lazily on first writeAndStageRecords call (table.newAppend())
-   * - Builder accumulates DataFile entries via appendFile() until commit()
-   * - Builder cleared after commitTransaction
-   *
-   * Implementation pattern:
-   * {{{
-   * val catalog = new NessieCatalog()
-   * catalog.initialize("nessie", Map(
-   *   "uri" -> config.catalogUri,
-   *   "warehouse" -> config.warehousePath,
-   *   "ref" -> config.nessieDefaultBranch
-   * ))
-   * val table = catalog.loadTable(TableIdentifier.of(namespace, tableName))
-   * val appender = table.newAppend()  // Creates the builder
-   * appender.appendFile(dataFile)      // Stages a file
-   * appender.commit()                  // Commits atomically
-   * }}}
-   *
-   * TODO: Implement in Phase 2
-   */
-  case class Live(
-    namespace: String,
-    tableName: String,
-    appenderRef: Ref[Option[FileAppender]]
-  ) extends IcebergCatalog:
-
-    def getTableLocation(
-      namespace: String,
-      tableName: String
-    ): IO[ExloError, String] =
-      ZIO.fail(
-        ExloError.StateReadError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-    def tableExists(
-      namespace: String,
-      tableName: String
-    ): IO[ExloError, Boolean] =
-      ZIO.fail(
-        ExloError.StateReadError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-    def createTable(
-      namespace: String,
-      tableName: String,
-      customLocation: Option[String]
-    ): IO[ExloError, Unit] =
-      // Phase 2 implementation will:
-      // 1. Check if table exists (skip if already exists)
-      // 2. Build ExloRecord schema using Iceberg Schema API with unique field IDs
-      // 3. Create table with schema at customLocation or warehouse path
-      // 4. Set up partitioning if needed (e.g., by connectorId or date)
-      ZIO.fail(
-        ExloError.StateReadError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-    def readSnapshotSummary(
-      namespace: String,
-      tableName: String
-    ): IO[ExloError, Map[String, String]] =
-      // Phase 2: Load table, get current snapshot, extract summary properties
-      // val table = catalog.loadTable(...)
-      // val snapshot = table.currentSnapshot()
-      // snapshot.summary().asScala.toMap
-      ZIO.fail(
-        ExloError.StateReadError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-    def writeAndStageRecords(
-      namespace: String,
-      tableName: String,
-      records: Chunk[ExloRecord]
-    ): IO[ExloError, DataFile] =
-      // Phase 2 implementation:
-      // 1. Write physical Parquet file (using Iceberg FileAppender/ParquetWriter)
-      // 2. Get or create AppendFiles transaction for this table
-      // 3. Stage the DataFile in the transaction
-      // 4. Return DataFile metadata
-      ZIO.fail(
-        ExloError.IcebergWriteError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-    def commitTransaction(
-      namespace: String,
-      tableName: String,
-      state: String,
-      stateVersion: Long
-    ): IO[ExloError, Unit] =
-      // Phase 2 implementation:
-      // 1. Get transaction for this table (if none exists, nothing to commit)
-      // 2. Add state metadata to snapshot summary
-      // 3. Commit transaction atomically (Iceberg handles OCC retries)
-      // 4. Clear transaction from map
-      ZIO.fail(
-        ExloError.IcebergWriteError(
-          new NotImplementedError("Live implementation pending Phase 2")
-        )
-      )
-
-  object Live:
-
-    /**
-     * Create a Live IcebergCatalog instance for a specific table.
-     *
-     * One catalog instance per table (one connection = one table).
-     * Each instance manages its own FileAppender for staged writes.
-     *
-     * @param namespace Iceberg namespace for this catalog
-     * @param tableName Iceberg table name for this catalog
-     * @return ZLayer providing IcebergCatalog for the specified table
-     */
-    def layer(namespace: String, tableName: String): ZLayer[Any, Nothing, IcebergCatalog] =
-      ZLayer.scoped {
-        for {
-          appenderRef <- Ref.make[Option[FileAppender]](None)
-        } yield Live(namespace, tableName, appenderRef)
-      }
-
-  /**
-   * Default live layer for testing - requires namespace and tableName elsewhere.
-   * Production code should use Live.layer(namespace, tableName) instead.
-   */
-  val live: ZLayer[Any, Nothing, IcebergCatalog] =
-    Live.layer("default", "default_table")
-
-  /**
-   * Stub implementation for testing.
-   *
-   * Returns predictable locations based on warehouse convention.
-   * Simulates snapshot summaries, file writes, and transaction management in memory.
+   * Simulates Iceberg behavior without requiring actual catalog infrastructure:
+   * - Tracks snapshot summaries in memory
+   * - Accumulates staged files in memory
+   * - Simulates transaction commit by updating state and clearing staged files
    */
   case class Stub(
     warehousePath: String = "s3://test-bucket/warehouse",
