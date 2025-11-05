@@ -7,15 +7,16 @@ import zio.*
 /**
  * Catalog selector for dynamic IcebergCatalog layer creation.
  *
- * Implements the Zionomicon Ch 18 pattern for dynamic service selection:
- * - Uses ZLayer.fromZIO to compute the service at layer construction time
- * - Pattern matches on CatalogType to delegate to the appropriate Live implementation
- * - Each catalog Live implementation is in a separate file for maintainability
+ * Implements the Zionomicon Ch 17-18 pattern for service composition: - Dynamically selects
+ * CatalogOps based on catalog type (Nessie, Glue, Hive, JDBC, Databricks) - Combines with shared
+ * IcebergWriter layer - Composes both into IcebergCatalog.Live
  *
- * This pattern keeps catalog selection logic centralized while allowing each
- * catalog implementation to grow independently in its own module.
+ * This eliminates code duplication - all catalog types share the same ~80% Iceberg SDK code
+ * (Parquet writing, transactions) via IcebergWriter. Only catalog-specific metadata operations
+ * vary.
  *
- * The layer pulls config directly to keep coupling low.
+ * Architecture: StorageConfig → CatalogOps (varies) ++ IcebergWriter (shared) → IcebergCatalog
+ * (composed)
  */
 object IcebergCatalogSelector:
 
@@ -26,29 +27,49 @@ object IcebergCatalogSelector:
    *
    * Pulls both StorageConfig and StreamConfig from the config provider.
    *
-   * @return ZLayer that provides IcebergCatalog
+   * @return
+   *   ZLayer that provides IcebergCatalog
    */
   val layer: ZLayer[StorageConfig, Throwable, IcebergCatalog] =
-    ZLayer.fromZIO {
+    ZLayer.makeSome[StorageConfig, IcebergCatalog](
+      // Shared IcebergWriter layer (used by all catalog types)
+      IcebergWriter.Live.layer,
+      // Dynamic CatalogOps selection based on catalog type
+      catalogOpsLayer,
+      // Compose CatalogOps + IcebergWriter → IcebergCatalog
+      IcebergCatalog.Live.layer
+    )
+
+  /**
+   * Select the appropriate CatalogOps layer based on catalog type.
+   *
+   * Pattern matches on CatalogConfig to delegate to the correct catalog implementation. Each
+   * catalog has its own CatalogOps implementation (NessieCatalogOps, GlueCatalogOps, etc.).
+   */
+  private val catalogOpsLayer: ZLayer[StorageConfig, Throwable, CatalogOps] =
+    ZLayer.scoped {
       for {
         storageConfig <- ZIO.service[StorageConfig]
-        streamConfig <- ZIO.config(StreamConfig.config)
 
-        catalog <- storageConfig.catalog match {
+        catalogOps <- storageConfig.catalog match {
           case nessie: CatalogConfig.Nessie =>
-            NessieCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, nessie)
+            ZIO
+              .service[CatalogOps]
+              .provideLayer(
+                NessieCatalogOps.layer(storageConfig.warehousePath, storageConfig.storage, nessie)
+              )
 
           case glue: CatalogConfig.Glue =>
-            GlueCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, glue)
+            ZIO.dieMessage("GlueCatalogOps not yet implemented")
 
           case hive: CatalogConfig.Hive =>
-            HiveCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, hive)
+            ZIO.dieMessage("HiveCatalogOps not yet implemented")
 
           case jdbc: CatalogConfig.Jdbc =>
-            JdbcCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, jdbc)
+            ZIO.dieMessage("JdbcCatalogOps not yet implemented")
 
           case databricks: CatalogConfig.Databricks =>
-            DatabricksCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, databricks)
+            ZIO.dieMessage("DatabricksCatalogOps not yet implemented")
         }
-      } yield catalog
+      } yield catalogOps
     }

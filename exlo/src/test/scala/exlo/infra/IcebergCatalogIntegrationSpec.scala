@@ -7,25 +7,27 @@ import zio.test.Assertion.*
 
 import java.util.UUID
 
-/** Integration tests for IcebergCatalog.Live with real Nessie and MinIO.
-  *
-  * Pattern:
-  * - Each test creates its own catalog layer with catalogLayer(namespace, tableName)
-  * - Catalog layer starts containers, sets up config, loads StorageConfig, creates IcebergCatalog
-  * - Containers are scoped to the test and cleaned up automatically
-  */
+/**
+ * Integration tests for IcebergCatalog.Live with real Nessie and MinIO.
+ *
+ * Pattern:
+ * - Each test creates its own catalog layer with catalogLayer(namespace, tableName)
+ * - Catalog layer starts containers, sets up config, loads StorageConfig, creates IcebergCatalog
+ * - Containers are scoped to the test and cleaned up automatically
+ */
 object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
 
   override val bootstrap: ZLayer[Any, Any, TestEnvironment] =
     testEnvironment
 
-  /** Create a catalog layer for a specific table.
-    *
-    * Each test gets its own containers + catalog instance.
-    */
+  /**
+   * Create a catalog layer for a specific table.
+   *
+   * Each test gets its own containers + catalog instance.
+   */
   private def catalogForTable(
-      namespace: String,
-      tableName: String
+    namespace: String,
+    tableName: String
   ): ZLayer[Any, Throwable, IcebergCatalog] =
     NessieTestContainer.catalogLayer(namespace, tableName)
 
@@ -90,12 +92,11 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         _ <- catalog.commitTransaction(namespace, tableName, state, stateVersion)
 
         // Read state back
-        summary <- catalog.readSnapshotSummary(namespace, tableName)
+        maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
         dataFile.recordCount == 1,
-        summary.get("exlo.state").contains(state),
-        summary.get("exlo.state.version").contains("1")
+        maybeSummary.contains((state, stateVersion))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("state version mismatch returns empty summary") {
@@ -109,10 +110,10 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         _ <- catalog.createTable(namespace, tableName)
 
         // Read state from empty table
-        summary <- catalog.readSnapshotSummary(namespace, tableName)
+        maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
-        summary.isEmpty
+        maybeSummary.isEmpty
       )).provide(catalogForTable(namespace, tableName))
     },
     test("multiple batches accumulate before commit") {
@@ -160,15 +161,16 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         file2 <- catalog.writeAndStageRecords(namespace, tableName, batch2)
 
         // Commit both batches atomically
-        _ <- catalog.commitTransaction(namespace, tableName, """{"done":true}""", 1L)
+        finalState = """{"done":true}"""
+        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L)
 
         // Verify state
-        summary <- catalog.readSnapshotSummary(namespace, tableName)
+        maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
         file1.recordCount == 1,
         file2.recordCount == 1,
-        summary.get("exlo.state").contains("""{"done":true}""")
+        maybeSummary.contains((finalState, 1L))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("commit with no staged files still persists state") {
@@ -183,16 +185,14 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
 
         // Commit without writing any files - simulates connector doing work but finding no new data
         // This is CRITICAL: we must save state even if there are no records to avoid redoing expensive work
-        _       <- catalog
-          .commitTransaction(namespace, tableName, """{"cursor":"exhausted","checked_at":"2025-11-01T10:00:00Z"}""", 1L)
+        finalState = """{"cursor":"exhausted","checked_at":"2025-11-01T10:00:00Z"}"""
+        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L)
 
         // State MUST be persisted even though no data files were written
-        summary <- catalog.readSnapshotSummary(namespace, tableName)
+        maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
-        summary.get("exlo.state").contains("""{"cursor":"exhausted","checked_at":"2025-11-01T10:00:00Z"}"""),
-        summary.get("exlo.state.version").contains("1"),
-        summary.get("total-data-files").contains("0") // No data files, but snapshot exists
+        maybeSummary.contains((finalState, 1L))
       )).provide(catalogForTable(namespace, tableName))
     }
   ) @@ TestAspect.sequential // Run tests sequentially to avoid container issues

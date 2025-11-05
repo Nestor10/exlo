@@ -3,22 +3,23 @@ package examples
 import zio.*
 import zio.stream.*
 
-/** Simplest possible EXLO connector with hardcoded data.
-  *
-  * Demonstrates:
-  * - Basic connector pattern
-  * - Emitting Data and Checkpoint elements
-  * - No external dependencies
-  *
-  * Run with: sbt "examples/runMain examples.SimpleConnector"
-  */
+/**
+ * Simplest possible EXLO connector with hardcoded data.
+ *
+ * Demonstrates:
+ * - Basic connector pattern
+ * - Emitting Data and Checkpoint elements
+ * - No external dependencies
+ *
+ * Run with: sbt "examples/runMain examples.SimpleConnector"
+ */
 object SimpleConnector extends ZIOAppDefault:
 
   def run =
     ZIO.logInfo("Simple connector - emitting hardcoded data") *>
-    extract("")
-      .tap(elem => ZIO.logInfo(s"Emitted: $elem"))
-      .runDrain
+      extract("")
+        .tap(elem => ZIO.logInfo(s"Emitted: $elem"))
+        .runDrain
 
   def extract(state: String): ZStream[Any, Throwable, StreamElement] =
     ZStream(

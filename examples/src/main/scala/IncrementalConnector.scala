@@ -3,32 +3,33 @@ package examples
 import exlo.*
 import exlo.domain.StreamElement
 import zio.*
-import zio.stream.*
 import zio.json.*
+import zio.stream.*
+
 import java.time.Instant
 
-/** Demonstrates incremental extraction pattern.
-  *
-  * Shows:
-  * - Timestamp-based incremental sync
-  * - Fetching only new data since last checkpoint
-  * - Structured state with timestamps
-  *
-  * Run with: sbt "examples/runMain examples.IncrementalConnector"
-  */
+/**
+ * Demonstrates incremental extraction pattern.
+ *
+ * Shows:
+ * - Timestamp-based incremental sync
+ * - Fetching only new data since last checkpoint
+ * - Structured state with timestamps
+ *
+ * Run with: sbt "examples/runMain examples.IncrementalConnector"
+ */
 object IncrementalConnector extends ExloApp:
 
   override def connectorId: String = "incremental-connector"
-  
+
   override def connectorVersion: String = "1.0.0"
-  
+
   type Env = Any
-  
+
   override def extract(state: String): ZStream[Any, Throwable, StreamElement] =
-    val lastTimestamp = if state.isEmpty then
-      Instant.parse("2024-01-01T00:00:00Z")
-    else
-      parseTimestampFromState(state)
+    val lastTimestamp =
+      if state.isEmpty then Instant.parse("2024-01-01T00:00:00Z")
+      else parseTimestampFromState(state)
 
     for
       _ <- ZStream.fromZIO(ZIO.logInfo(s"Fetching records since $lastTimestamp"))
@@ -40,7 +41,6 @@ object IncrementalConnector extends ExloApp:
 
       // Save latest timestamp as checkpoint
       latestTimestamp = records.map(_.modifiedAt).maxOption.getOrElse(lastTimestamp)
-
     yield StreamElement.Checkpoint(s"""{"lastTimestamp": "$latestTimestamp"}""")
 
   def fetchRecordsSince(timestamp: Instant): Task[List[Record]] =
@@ -56,7 +56,8 @@ object IncrementalConnector extends ExloApp:
 
   def parseTimestampFromState(state: String): Instant =
     import zio.json.*
-    state.fromJson[Map[String, String]]
+    state
+      .fromJson[Map[String, String]]
       .toOption
       .flatMap(_.get("lastTimestamp"))
       .map(Instant.parse)

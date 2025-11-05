@@ -39,25 +39,18 @@ object FileAppender:
 /**
  * Infrastructure service for interacting with Iceberg catalog.
  *
- * Provides low-level Iceberg operations. This is infrastructure (not business logic),
- * so it lives in the `infra` package.
+ * Composed service combining: - CatalogOps: Catalog-specific metadata operations (loadTable,
+ * tableExists, createTable) - IcebergWriter: Generic Iceberg SDK operations (Parquet writing,
+ * transaction staging, commit)
  *
- * Application services (e.g., Table in exlo.service) depend on this infrastructure
- * service to implement their business logic.
+ * This composition follows Zionomicon Ch 17 service composition principles: - CatalogOps varies by
+ * catalog type (Nessie, Glue, Hive, JDBC, Databricks) - IcebergWriter is shared across all
+ * catalogs (eliminates ~80% code duplication)
  *
- * Abstracts over different catalog implementations (Nessie, Glue, Hive, JDBC, Databricks)
- * using the standard trait + Live implementations + Stub pattern.
+ * Architecture: User calls IcebergCatalog → Delegates to CatalogOps for table lookup → Passes
+ * Table to IcebergWriter for data operations
  *
- * Catalog Implementations:
- * - Each catalog type has its own Live implementation in the catalog package
- * - Use IcebergCatalogSelector.layer() for dynamic catalog selection based on StorageConfig
- * - See: catalog.NessieCatalogLive, catalog.GlueCatalogLive, etc.
- *
- * Key Responsibilities:
- * - Catalog operations (table existence, creation, metadata access)
- * - Physical file writing (Parquet encoding, S3 writes via Iceberg SDK)
- * - Snapshot summary reading (for state management)
- * - Transaction management (creating, staging files, committing with state)
+ * Use IcebergCatalogSelector.layer() for dynamic catalog selection based on StorageConfig.
  */
 trait IcebergCatalog:
 
@@ -129,22 +122,22 @@ trait IcebergCatalog:
   ): IO[ExloError, Unit]
 
   /**
-   * Read snapshot summary metadata from the table's current snapshot.
+   * Read EXLO state metadata from the table's current snapshot.
    *
-   * Returns key-value properties stored in the snapshot summary, including
-   * EXLO's state metadata ("exlo.state", "exlo.state.version").
+   * Returns the connector state and version persisted in the latest snapshot's summary. Used for
+   * incremental sync to resume from last checkpoint.
    *
    * @param namespace
    *   Iceberg namespace
    * @param tableName
    *   Iceberg table name
    * @return
-   *   Map of snapshot summary properties, empty if no snapshot exists
+   *   Tuple of (state: String, stateVersion: Long) or None if no snapshots exist
    */
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): IO[ExloError, Map[String, String]]
+  ): IO[ExloError, Option[(String, Long)]]
 
   /**
    * Write a batch of ExloRecords to a Parquet file and stage it in the active transaction.
@@ -266,41 +259,91 @@ object IcebergCatalog:
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): ZIO[IcebergCatalog, ExloError, Map[String, String]] =
+  ): ZIO[IcebergCatalog, ExloError, Option[(String, Long)]] =
     ZIO.serviceWithZIO[IcebergCatalog](_.readSnapshotSummary(namespace, tableName))
 
   /**
-   * Accessor for writeAndStageRecords.
+   * Live implementation - composed from CatalogOps and IcebergWriter.
    *
-   * Use: `IcebergCatalog.writeAndStageRecords(namespace, tableName, records)`
+   * This is the key composition: catalog-specific operations delegate to CatalogOps, generic
+   * Iceberg operations delegate to IcebergWriter. All catalog types (Nessie, Glue, Hive, JDBC,
+   * Databricks) share the same composition logic, varying only in their CatalogOps implementation.
    */
-  def writeAndStageRecords(
-    namespace: String,
-    tableName: String,
-    records: Chunk[ExloRecord]
-  ): ZIO[IcebergCatalog, ExloError, DataFile] =
-    ZIO.serviceWithZIO[IcebergCatalog](_.writeAndStageRecords(namespace, tableName, records))
+  case class Live(
+    catalogOps: CatalogOps,
+    writer: IcebergWriter
+  ) extends IcebergCatalog:
 
-  /**
-   * Accessor for commitTransaction.
-   *
-   * Use: `IcebergCatalog.commitTransaction(namespace, tableName, state, stateVersion)`
-   */
-  def commitTransaction(
-    namespace: String,
-    tableName: String,
-    state: String,
-    stateVersion: Long
-  ): ZIO[IcebergCatalog, ExloError, Unit] =
-    ZIO.serviceWithZIO[IcebergCatalog](_.commitTransaction(namespace, tableName, state, stateVersion))
+    // Catalog-specific operations - delegate to CatalogOps
+    def getTableLocation(
+      namespace: String,
+      tableName: String
+    ): IO[ExloError, String] =
+      catalogOps.getTableLocation(namespace, tableName)
+
+    def tableExists(
+      namespace: String,
+      tableName: String
+    ): IO[ExloError, Boolean] =
+      catalogOps.tableExists(namespace, tableName)
+
+    def createTable(
+      namespace: String,
+      tableName: String,
+      customLocation: Option[String]
+    ): IO[ExloError, Unit] =
+      catalogOps.createTable(namespace, tableName, customLocation)
+
+    // Generic Iceberg operations - load table via CatalogOps, then use IcebergWriter
+    def readSnapshotSummary(
+      namespace: String,
+      tableName: String
+    ): IO[ExloError, Option[(String, Long)]] =
+      for {
+        table   <- catalogOps.loadTable(namespace, tableName)
+        summary <- writer.readSnapshotSummary(table)
+      } yield summary
+
+    def writeAndStageRecords(
+      namespace: String,
+      tableName: String,
+      records: Chunk[ExloRecord]
+    ): IO[ExloError, DataFile] =
+      for {
+        table    <- catalogOps.loadTable(namespace, tableName)
+        dataFile <- writer.writeAndStageRecords(table, records)
+      } yield dataFile
+
+    def commitTransaction(
+      namespace: String,
+      tableName: String,
+      state: String,
+      stateVersion: Long
+    ): IO[ExloError, Unit] =
+      for {
+        table <- catalogOps.loadTable(namespace, tableName)
+        _     <- writer.commitTransaction(table, state, stateVersion)
+      } yield ()
+
+  object Live:
+
+    /**
+     * Create IcebergCatalog layer from CatalogOps and IcebergWriter layers.
+     *
+     * This is the composition point - any CatalogOps implementation (Nessie, Glue, etc.) + shared
+     * IcebergWriter = complete IcebergCatalog.
+     *
+     * Use: `NessieCatalogOps.layer(...) ++ IcebergWriterLive.layer >>> IcebergCatalog.Live.layer`
+     */
+    val layer: ZLayer[CatalogOps & IcebergWriter, Nothing, IcebergCatalog] =
+      ZLayer.fromFunction(Live(_, _))
 
   /**
    * In-memory stub implementation for testing.
    *
-   * Simulates Iceberg behavior without requiring actual catalog infrastructure:
-   * - Tracks snapshot summaries in memory
-   * - Accumulates staged files in memory
-   * - Simulates transaction commit by updating state and clearing staged files
+   * Simulates Iceberg behavior without requiring actual catalog infrastructure: - Tracks snapshot
+   * summaries in memory - Accumulates staged files in memory - Simulates transaction commit by
+   * updating state and clearing staged files
    */
   case class Stub(
     warehousePath: String = "s3://test-bucket/warehouse",
@@ -330,9 +373,17 @@ object IcebergCatalog:
     def readSnapshotSummary(
       namespace: String,
       tableName: String
-    ): IO[ExloError, Map[String, String]] =
+    ): IO[ExloError, Option[(String, Long)]] =
       val key = s"$namespace.$tableName"
-      ZIO.succeed(snapshotSummaries.getOrElse(key, Map.empty))
+      ZIO.succeed {
+        snapshotSummaries.get(key).flatMap { summary =>
+          for {
+            state        <- summary.get("exlo.state")
+            versionStr   <- summary.get("exlo.state.version")
+            stateVersion <- versionStr.toLongOption
+          } yield (state, stateVersion)
+        }
+      }
 
     def writeAndStageRecords(
       namespace: String,

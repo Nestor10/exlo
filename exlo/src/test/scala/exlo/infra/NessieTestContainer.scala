@@ -5,31 +5,33 @@ import exlo.domain.*
 import org.testcontainers.containers.wait.strategy.Wait
 import zio.*
 
-/** Test infrastructure for running integration tests with real Nessie and MinIO.
-  *
-  * Provides:
-  * - Nessie catalog server (Git-like version control for Iceberg)
-  * - MinIO (S3-compatible object storage)
-  * - Helper method to create catalog layers for specific tables
-  *
-  * Pattern: Each test creates its own catalog layer with namespace/tableName using catalogLayer().
-  */
+/**
+ * Test infrastructure for running integration tests with real Nessie and MinIO.
+ *
+ * Provides:
+ * - Nessie catalog server (Git-like version control for Iceberg)
+ * - MinIO (S3-compatible object storage)
+ * - Helper method to create catalog layers for specific tables
+ *
+ * Pattern: Each test creates its own catalog layer with namespace/tableName using catalogLayer().
+ */
 object NessieTestContainer:
 
   private val nessiePort       = 19120
   private val minioPort        = 9000
   private val minioConsolePort = 9001
 
-  /** Create a layer providing IcebergCatalog for a specific table.
-    *
-    * Lifecycle:
-    * 1. Starts containers (scoped to this layer)
-    * 2. Creates ConfigProvider with container URLs + namespace/tableName
-    * 3. Loads StorageConfig from the test ConfigProvider
-    * 4. Creates IcebergCatalog using the loaded config
-    *
-    * Each test should call this to get a fresh catalog instance.
-    */
+  /**
+   * Create a layer providing IcebergCatalog for a specific table.
+   *
+   * Lifecycle:
+   * 1. Starts containers (scoped to this layer)
+   * 2. Creates ConfigProvider with container URLs + namespace/tableName
+   * 3. Loads StorageConfig from the test ConfigProvider
+   * 4. Creates IcebergCatalog using the loaded config
+   *
+   * Each test should call this to get a fresh catalog instance.
+   */
   def catalogLayer(namespace: String, tableName: String): ZLayer[Any, Throwable, IcebergCatalog] =
     ZLayer.scoped {
       for {
@@ -50,35 +52,39 @@ object NessieTestContainer:
 
         // Build config map with storage + stream config
         testConfig = Map(
-          "EXLO_STORAGE_WAREHOUSE_PATH"      -> "s3://test-bucket/warehouse",
-          "EXLO_STORAGE_BACKEND_S3_REGION"   -> "us-east-1",
-          "EXLO_STORAGE_BACKEND_S3_ENDPOINT" -> minioEndpoint,
-          "EXLO_STORAGE_BACKEND_S3_ACCESS_KEY_ID" -> accessKey,
+          "EXLO_STORAGE_WAREHOUSE_PATH"               -> "s3://test-bucket/warehouse",
+          "EXLO_STORAGE_BACKEND_S3_REGION"            -> "us-east-1",
+          "EXLO_STORAGE_BACKEND_S3_ENDPOINT"          -> minioEndpoint,
+          "EXLO_STORAGE_BACKEND_S3_ACCESS_KEY_ID"     -> accessKey,
           "EXLO_STORAGE_BACKEND_S3_SECRET_ACCESS_KEY" -> secretKey,
           "EXLO_STORAGE_BACKEND_S3_PATH_STYLE_ACCESS" -> "true",
-          "EXLO_STORAGE_CATALOG_NESSIE_URI"  -> nessieUri,
-          "EXLO_STORAGE_CATALOG_NESSIE_BRANCH" -> "main",
-          "EXLO_STREAM_NAMESPACE" -> namespace,
-          "EXLO_STREAM_TABLE_NAME" -> tableName
+          "EXLO_STORAGE_CATALOG_NESSIE_URI"           -> nessieUri,
+          "EXLO_STORAGE_CATALOG_NESSIE_BRANCH"        -> "main",
+          "EXLO_STREAM_NAMESPACE"                     -> namespace,
+          "EXLO_STREAM_TABLE_NAME"                    -> tableName
         )
 
         configProvider = exlo.config.ExloConfigProvider.fromMap(testConfig)
 
-        // Load config and create catalog with the test config provider
+        // Load config and create catalog layers with the test config provider
         storageConfig <- StorageConfig.load.withConfigProvider(configProvider)
-        
-        catalog <- storageConfig.catalog match {
+
+        // Create CatalogOps layer
+        catalogOpsLayer = storageConfig.catalog match {
           case nessie: CatalogConfig.Nessie =>
-            catalog.NessieCatalogLive.make(
-              namespace,
-              tableName,
+            catalog.NessieCatalogOps.layer(
               storageConfig.warehousePath,
               storageConfig.storage,
               nessie
             )
-          case _ =>
-            ZIO.fail(new IllegalStateException("Test containers only support Nessie catalog"))
+          case _                            =>
+            ZLayer.die(new IllegalStateException("Test containers only support Nessie catalog"))
         }
+
+        // Compose with IcebergWriter and build IcebergCatalog
+        catalog <- ZIO
+          .service[IcebergCatalog]
+          .provideLayer(catalogOpsLayer ++ IcebergWriter.Live.layer >>> IcebergCatalog.Live.layer)
 
       } yield catalog
     }

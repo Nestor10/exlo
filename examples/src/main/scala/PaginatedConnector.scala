@@ -3,52 +3,58 @@ package examples
 import exlo.*
 import exlo.domain.StreamElement
 import zio.*
-import zio.stream.*
 import zio.json.*
+import zio.stream.*
 
-/** Demonstrates pagination pattern for APIs.
-  *
-  * Shows:
-  * - State parsing and resumability
-  * - ZStream.unfoldZIO for pagination
-  * - Checkpoint after each page
-  *
-  * Run with: sbt "examples/runMain examples.PaginatedConnector"
-  */
+/**
+ * Demonstrates pagination pattern for APIs.
+ *
+ * Shows:
+ * - State parsing and resumability
+ * - ZStream.unfoldZIO for pagination
+ * - Checkpoint after each page
+ *
+ * Run with: sbt "examples/runMain examples.PaginatedConnector"
+ */
 object PaginatedConnector extends ExloApp:
 
   override def connectorId: String = "paginated-connector"
-  
+
   override def connectorVersion: String = "1.0.0"
-  
+
   type Env = Any
-  
+
   override def extract(state: String): ZStream[Any, Throwable, StreamElement] =
     val startPage = if state.isEmpty then 1 else parsePageFromState(state)
 
-    ZStream.unfoldZIO(startPage) { page =>
-      fetchPage(page).map {
-        case Some(data) =>
-          val elements =
-            data.records.map(r => StreamElement.Data(r.toJson)) :+
-            StreamElement.Checkpoint(s"""{"page": ${page + 1}}""")
-          Some((elements, page + 1))
+    ZStream
+      .unfoldZIO(startPage) { page =>
+        fetchPage(page).map {
+          case Some(data) =>
+            val elements =
+              data.records.map(r => StreamElement.Data(r.toJson)) :+
+                StreamElement.Checkpoint(s"""{"page": ${page + 1}}""")
+            Some((elements, page + 1))
 
-        case None =>
-          None // No more pages
+          case None =>
+            None // No more pages
+        }
       }
-    }.flatMap(ZStream.fromIterable)
+      .flatMap(ZStream.fromIterable)
 
   // Simulated API call
   def fetchPage(page: Int): Task[Option[PageData]] =
     ZIO.succeed {
       if page > 3 then None // Only 3 pages
-      else Some(PageData(
-        records = List(
-          Record(page * 10 + 1, s"User ${page * 10 + 1}"),
-          Record(page * 10 + 2, s"User ${page * 10 + 2}")
+      else
+        Some(
+          PageData(
+            records = List(
+              Record(page * 10 + 1, s"User ${page * 10 + 1}"),
+              Record(page * 10 + 2, s"User ${page * 10 + 2}")
+            )
+          )
         )
-      ))
     }
 
   def parsePageFromState(state: String): Int =
@@ -58,5 +64,6 @@ object PaginatedConnector extends ExloApp:
   override def environment = ZLayer.empty
 
   case class PageData(records: List[Record])
+
   case class Record(id: Int, name: String):
     def toJson: String = s"""{"id": $id, "name": "$name"}"""

@@ -5,6 +5,9 @@ val icebergVersion   = "1.10.0"
 val awsVersion       = "2.37.2"
 val nessieVersion    = "0.105.6"
 
+// Custom configuration for performance tests
+lazy val Perf = config("perf").extend(Test)
+
 lazy val root = (project in file("."))
   .aggregate(exlo, examples)
   .settings(
@@ -14,6 +17,7 @@ lazy val root = (project in file("."))
 
 lazy val exlo = project
   .in(file("exlo"))
+  .configs(Perf)
   .settings(
     name         := "exlo",
     version      := "0.1.0-SNAPSHOT",
@@ -60,7 +64,12 @@ lazy val exlo = project
       "org.testcontainers" % "testcontainers"            % "1.20.4" % Test,
       "org.testcontainers" % "minio"                     % "1.20.4" % Test
     ),
-    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
+
+    // Performance test configuration
+    inConfig(Perf)(Defaults.testSettings),
+    Perf / fork := true,
+    Perf / javaOptions ++= Seq("-Xmx2G", "-Xms1G")
   )
 
 lazy val examples = project

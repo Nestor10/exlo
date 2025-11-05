@@ -108,17 +108,16 @@ object Table:
     def readState(stateVersion: Long): IO[ExloError, String] =
       for {
         // Read snapshot summary from Iceberg
-        summary <- catalog.readSnapshotSummary(namespace, tableName)
-
-        // Extract state version from summary
-        storedVersion = summary.get("exlo.state.version").map(_.toLong)
+        maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
         // Return state only if version matches, else empty string for fresh start
         state <- ZIO.succeed {
-          if (storedVersion.contains(stateVersion))
-            summary.getOrElse("exlo.state", "")
-          else
-            "" // Version mismatch → trigger fresh start
+          maybeSummary match {
+            case Some((storedState, storedVersion)) if storedVersion == stateVersion =>
+              storedState // Version matches → use stored state
+            case _ =>
+              "" // No snapshot or version mismatch → trigger fresh start
+          }
         }
       } yield state
 
@@ -147,7 +146,7 @@ object Table:
     val layer: ZLayer[IcebergCatalog, Throwable, Table] =
       ZLayer {
         for {
-          catalog <- ZIO.service[IcebergCatalog]
+          catalog      <- ZIO.service[IcebergCatalog]
           streamConfig <- ZIO.config(StreamConfig.config)
         } yield Live(streamConfig.namespace, streamConfig.tableName, catalog)
       }

@@ -35,11 +35,13 @@ object StreamProcessingSpec extends ZIOSpecDefault:
   )
 
   val testStateConfig = StateConfig(version = 1L)
-  
-  val testConfigProvider = exlo.config.ExloConfigProvider.fromMap(Map(
-    "EXLO_STREAM_NAMESPACE" -> "test",
-    "EXLO_STREAM_TABLE_NAME" -> "test_table"
-  ))
+
+  val testConfigProvider = exlo.config.ExloConfigProvider.fromMap(
+    Map(
+      "EXLO_STREAM_NAMESPACE"  -> "test",
+      "EXLO_STREAM_TABLE_NAME" -> "test_table"
+    )
+  )
 
   def spec = suite("Pipeline Integration")(
     test("processes connector stream and commits at checkpoints") {
@@ -51,10 +53,12 @@ object StreamProcessingSpec extends ZIOSpecDefault:
         table <- ZIO.service[Table]
 
         // Run the pipeline
-        _ <- PipelineOrchestrator.run(
-          syncMetadata = testSyncMetadata,
-          stateVersion = 1L
-        ).withConfigProvider(testConfigProvider)
+        _ <- PipelineOrchestrator
+          .run(
+            syncMetadata = testSyncMetadata,
+            stateVersion = 1L
+          )
+          .withConfigProvider(testConfigProvider)
 
         // Verify results
         stub = table.asInstanceOf[Table.Stub]
@@ -74,10 +78,12 @@ object StreamProcessingSpec extends ZIOSpecDefault:
       for
         table <- ZIO.service[Table]
 
-        _ <- PipelineOrchestrator.run(
-          syncMetadata = testSyncMetadata,
-          stateVersion = 1L
-        ).withConfigProvider(testConfigProvider)
+        _ <- PipelineOrchestrator
+          .run(
+            syncMetadata = testSyncMetadata,
+            stateVersion = 1L
+          )
+          .withConfigProvider(testConfigProvider)
 
         stub = table.asInstanceOf[Table.Stub]
       yield assertTrue(
@@ -99,10 +105,12 @@ object StreamProcessingSpec extends ZIOSpecDefault:
       for
         table <- ZIO.service[Table]
 
-        _ <- PipelineOrchestrator.run(
-          syncMetadata = testSyncMetadata,
-          stateVersion = 1L
-        ).withConfigProvider(testConfigProvider)
+        _ <- PipelineOrchestrator
+          .run(
+            syncMetadata = testSyncMetadata,
+            stateVersion = 1L
+          )
+          .withConfigProvider(testConfigProvider)
 
         stub = table.asInstanceOf[Table.Stub]
       yield assertTrue(
