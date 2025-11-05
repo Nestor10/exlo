@@ -147,7 +147,7 @@ object Table:
     val layer: ZLayer[IcebergCatalog, Throwable, Table] =
       ZLayer {
         for {
-          catalog      <- ZIO.service[IcebergCatalog]
+          catalog <- ZIO.service[IcebergCatalog]
           streamConfig <- ZIO.config(StreamConfig.config)
         } yield Live(streamConfig.namespace, streamConfig.tableName, catalog)
       }

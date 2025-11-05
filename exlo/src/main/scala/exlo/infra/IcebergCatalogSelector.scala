@@ -32,53 +32,23 @@ object IcebergCatalogSelector:
     ZLayer.fromZIO {
       for {
         storageConfig <- ZIO.service[StorageConfig]
-        streamConfig  <- ZIO.config(StreamConfig.config)
+        streamConfig <- ZIO.config(StreamConfig.config)
 
         catalog <- storageConfig.catalog match {
           case nessie: CatalogConfig.Nessie =>
-            NessieCatalogLive.make(
-              streamConfig.namespace,
-              streamConfig.tableName,
-              storageConfig.warehousePath,
-              storageConfig.storage,
-              nessie
-            )
+            NessieCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, nessie)
 
           case glue: CatalogConfig.Glue =>
-            GlueCatalogLive.make(
-              streamConfig.namespace,
-              streamConfig.tableName,
-              storageConfig.warehousePath,
-              storageConfig.storage,
-              glue
-            )
+            GlueCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, glue)
 
           case hive: CatalogConfig.Hive =>
-            HiveCatalogLive.make(
-              streamConfig.namespace,
-              streamConfig.tableName,
-              storageConfig.warehousePath,
-              storageConfig.storage,
-              hive
-            )
+            HiveCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, hive)
 
           case jdbc: CatalogConfig.Jdbc =>
-            JdbcCatalogLive.make(
-              streamConfig.namespace,
-              streamConfig.tableName,
-              storageConfig.warehousePath,
-              storageConfig.storage,
-              jdbc
-            )
+            JdbcCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, jdbc)
 
           case databricks: CatalogConfig.Databricks =>
-            DatabricksCatalogLive.make(
-              streamConfig.namespace,
-              streamConfig.tableName,
-              storageConfig.warehousePath,
-              storageConfig.storage,
-              databricks
-            )
+            DatabricksCatalogLive.make(streamConfig.namespace, streamConfig.tableName, storageConfig.warehousePath, storageConfig.storage, databricks)
         }
       } yield catalog
     }

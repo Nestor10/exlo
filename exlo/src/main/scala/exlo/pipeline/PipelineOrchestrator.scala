@@ -57,10 +57,9 @@ object PipelineOrchestrator:
       connector <- ZIO.service[Connector]
       catalog   <- ZIO.service[IcebergCatalog]
       config    <- ZIO.service[StateConfig]
-
+      
       // Config
-      streamConfig <- ZIO
-        .config(StreamConfig.config)
+      streamConfig <- ZIO.config(StreamConfig.config)
         .mapError(e => ExloError.ConfigurationError(s"Failed to load stream config: ${e.getMessage}"))
 
       // 1. Ensure table exists before trying to read state or append

@@ -7,32 +7,27 @@ import zio.test.Assertion.*
 
 import java.util.UUID
 
-/**
- * Integration tests for IcebergCatalog.Live with real Nessie and MinIO.
- *
- * Pattern from Zionomicon Ch 44:
- * - Uses provideLayerShared for expensive container resources
- * - Containers started once, shared across all tests
- * - Each test creates its own catalog instance for its specific table
- */
-object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageConfig]:
+/** Integration tests for IcebergCatalog.Live with real Nessie and MinIO.
+  *
+  * Pattern:
+  * - Each test creates its own catalog layer with catalogLayer(namespace, tableName)
+  * - Catalog layer starts containers, sets up config, loads StorageConfig, creates IcebergCatalog
+  * - Containers are scoped to the test and cleaned up automatically
+  */
+object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
 
-  /**
-   * Bootstrap layer provides test environment + containers.
-   *
-   * Lifecycle:
-   * 1. Starts Nessie + MinIO containers (once for entire suite)
-   * 2. Each test creates its own IcebergCatalog.Live for its table
-   */
-  override val bootstrap: ZLayer[Any, Any, TestEnvironment & StorageConfig] =
-    testEnvironment ++ NessieTestContainer.layer.orDie
+  override val bootstrap: ZLayer[Any, Any, TestEnvironment] =
+    testEnvironment
 
-  /**
-   * Create a catalog layer for a specific table.
-   * Each test should create its own catalog instance.
-   */
-  private def catalogForTable(namespace: String, tableName: String): ZLayer[StorageConfig, Nothing, IcebergCatalog] =
-    IcebergCatalogSelector.layer(namespace, tableName).orDie
+  /** Create a catalog layer for a specific table.
+    *
+    * Each test gets its own containers + catalog instance.
+    */
+  private def catalogForTable(
+      namespace: String,
+      tableName: String
+  ): ZLayer[Any, Throwable, IcebergCatalog] =
+    NessieTestContainer.catalogLayer(namespace, tableName)
 
   def spec = suite("IcebergCatalog Integration Tests")(
     test("create table and verify it exists") {
@@ -58,7 +53,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageCo
         !existsBefore,
         existsAfter,
         location.contains("s3://test-bucket/warehouse")
-      )).provideSome[StorageConfig](catalogForTable(namespace, tableName))
+      )).provide(catalogForTable(namespace, tableName))
     },
     test("write records, commit, and read state") {
       val namespace = "test_ns"
@@ -101,7 +96,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageCo
         dataFile.recordCount == 1,
         summary.get("exlo.state").contains(state),
         summary.get("exlo.state.version").contains("1")
-      )).provideSome[StorageConfig](catalogForTable(namespace, tableName))
+      )).provide(catalogForTable(namespace, tableName))
     },
     test("state version mismatch returns empty summary") {
       val namespace = "test_ns"
@@ -118,7 +113,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageCo
 
       } yield assertTrue(
         summary.isEmpty
-      )).provideSome[StorageConfig](catalogForTable(namespace, tableName))
+      )).provide(catalogForTable(namespace, tableName))
     },
     test("multiple batches accumulate before commit") {
       val namespace = "test_ns"
@@ -174,7 +169,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageCo
         file1.recordCount == 1,
         file2.recordCount == 1,
         summary.get("exlo.state").contains("""{"done":true}""")
-      )).provideSome[StorageConfig](catalogForTable(namespace, tableName))
+      )).provide(catalogForTable(namespace, tableName))
     },
     test("commit with no staged files still persists state") {
       val namespace = "test_ns"
@@ -198,6 +193,6 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment & StorageCo
         summary.get("exlo.state").contains("""{"cursor":"exhausted","checked_at":"2025-11-01T10:00:00Z"}"""),
         summary.get("exlo.state.version").contains("1"),
         summary.get("total-data-files").contains("0") // No data files, but snapshot exists
-      )).provideSome[StorageConfig](catalogForTable(namespace, tableName))
+      )).provide(catalogForTable(namespace, tableName))
     }
   ) @@ TestAspect.sequential // Run tests sequentially to avoid container issues

@@ -52,3 +52,4 @@ object ExloError:
    *   Underlying exception from user code
    */
   case class ConnectorError(message: String, cause: Throwable) extends ExloError
+

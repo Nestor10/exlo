@@ -1,11 +1,19 @@
-val scala3Version  = "3.7.3"
-val zioVersion     = "2.1.22"
-val icebergVersion = "1.10.0"
-val awsVersion     = "2.37.2"
-val nessieVersion  = "0.105.6"
+val scala3Version    = "3.7.3"
+val zioVersion       = "2.1.22"
+val zioConfigVersion = "4.0.5"
+val icebergVersion   = "1.10.0"
+val awsVersion       = "2.37.2"
+val nessieVersion    = "0.105.6"
 
-lazy val root = project
-  .in(file("."))
+lazy val root = (project in file("."))
+  .aggregate(exlo, examples)
+  .settings(
+    name           := "exlo-root",
+    publish / skip := true
+  )
+
+lazy val exlo = project
+  .in(file("exlo"))
   .settings(
     name         := "exlo",
     version      := "0.1.0-SNAPSHOT",
@@ -14,6 +22,11 @@ lazy val root = project
       // ZIO Core
       "dev.zio" %% "zio"         % zioVersion,
       "dev.zio" %% "zio-streams" % zioVersion,
+
+      // ZIO Config
+      "dev.zio" %% "zio-config"          % zioConfigVersion,
+      "dev.zio" %% "zio-config-magnolia" % zioConfigVersion,
+      "dev.zio" %% "zio-config-typesafe" % zioConfigVersion,
 
       // Apache Iceberg
       "org.apache.iceberg" % "iceberg-core"    % icebergVersion,
@@ -48,4 +61,18 @@ lazy val root = project
       "org.testcontainers" % "minio"                     % "1.20.4" % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
+  )
+
+lazy val examples = project
+  .in(file("examples"))
+  .dependsOn(exlo)
+  .settings(
+    name         := "exlo-examples",
+    scalaVersion := scala3Version,
+    libraryDependencies ++= Seq(
+      "dev.zio" %% "zio"         % zioVersion,
+      "dev.zio" %% "zio-streams" % zioVersion,
+      "dev.zio" %% "zio-http"    % "3.0.1",
+      "dev.zio" %% "zio-json"    % "0.7.3"
+    )
   )
