@@ -102,6 +102,7 @@ object Table:
   case class Live(
     namespace: String,
     tableName: String,
+    streamName: String,
     catalog: IcebergCatalog
   ) extends Table:
 
@@ -110,14 +111,27 @@ object Table:
         // Read snapshot summary from Iceberg
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
-        // Return state only if version matches, else empty string for fresh start
-        state <- ZIO.succeed {
-          maybeSummary match {
-            case Some((storedState, storedVersion)) if storedVersion == stateVersion =>
-              storedState // Version matches → use stored state
-            case _ =>
-              "" // No snapshot or version mismatch → trigger fresh start
-          }
+        // Validate stream name matches (prevent cross-stream contamination)
+        state <- maybeSummary match {
+          case Some((storedState, storedVersion, storedStreamName)) =>
+            if (storedStreamName != streamName) {
+              // Stream name mismatch - different stream wrote to this table!
+              ZIO.fail(
+                ExloError.ConfigurationError(
+                  s"Stream name mismatch: table $namespace.$tableName has state from stream '$storedStreamName' but current execution is for stream '$streamName'. " +
+                  s"This prevents accidental cross-stream contamination. Each stream should write to its own table."
+                )
+              )
+            } else if (storedVersion == stateVersion) {
+              // Stream name and version match → use stored state
+              ZIO.succeed(storedState)
+            } else {
+              // Stream name matches but version mismatch → trigger fresh start
+              ZIO.succeed("")
+            }
+          case None =>
+            // No snapshot → trigger fresh start
+            ZIO.succeed("")
         }
       } yield state
 
@@ -126,8 +140,8 @@ object Table:
       catalog.writeAndStageRecords(namespace, tableName, records)
 
     def commitWithState(state: String, stateVersion: Long): IO[ExloError, Unit] =
-      // Delegate to infrastructure - it handles commit with state metadata
-      catalog.commitTransaction(namespace, tableName, state, stateVersion)
+      // Delegate to infrastructure - pass stream name for validation
+      catalog.commitTransaction(namespace, tableName, state, stateVersion, streamName)
 
   object Live:
 
@@ -148,7 +162,7 @@ object Table:
         for {
           catalog      <- ZIO.service[IcebergCatalog]
           streamConfig <- ZIO.config(StreamConfig.config)
-        } yield Live(streamConfig.namespace, streamConfig.tableName, catalog)
+        } yield Live(streamConfig.namespace, streamConfig.tableName, streamConfig.streamName, catalog)
       }
 
   /**

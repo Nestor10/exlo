@@ -81,11 +81,12 @@ object ExloRunner:
         // Each layer pulls its own config via ZIO.config - fully decoupled
         storageLayer = ZLayer.fromZIO(StorageConfig.load)
         
-        frameworkLayer = ZLayer.make[IcebergCatalog & Table & StateConfig](
-          storageLayer,              // Provides StorageConfig for catalog layer
+        frameworkLayer = ZLayer.make[IcebergCatalog & Table & StateConfig & StreamConfig](
+          storageLayer,                  // Provides StorageConfig for catalog layer
           IcebergCatalogSelector.layer,  // Pulls StreamConfig via ZIO.config
-          Table.Live.layer,          // Pulls StreamConfig via ZIO.config
-          StateConfig.layer
+          Table.Live.layer,              // Pulls StreamConfig via ZIO.config
+          StateConfig.layer,
+          ZLayer.fromZIO(ZIO.config(StreamConfig.config)) // Load StreamConfig from env
         )
 
         // Load sync config for orchestrator

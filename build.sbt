@@ -9,7 +9,7 @@ val nessieVersion    = "0.105.6"
 lazy val Perf = config("perf").extend(Test)
 
 lazy val root = (project in file("."))
-  .aggregate(exlo, examples)
+  .aggregate(exlo, exloYaml, examples)
   .settings(
     name           := "exlo-root",
     publish / skip := true
@@ -70,6 +70,37 @@ lazy val exlo = project
     inConfig(Perf)(Defaults.testSettings),
     Perf / fork := true,
     Perf / javaOptions ++= Seq("-Xmx2G", "-Xms1G")
+  )
+
+lazy val exloYaml = project
+  .in(file("exlo-yaml"))
+  .dependsOn(exlo)
+  .settings(
+    name         := "exlo-yaml",
+    version      := "0.1.0-SNAPSHOT",
+    scalaVersion := scala3Version,
+    libraryDependencies ++= Seq(
+      // Circe ecosystem for JSON/YAML
+      "io.circe" %% "circe-core"    % "0.14.10",
+      "io.circe" %% "circe-generic" % "0.14.10",
+      "io.circe" %% "circe-parser"  % "0.14.10",
+      "io.circe" %% "circe-yaml"    % "0.16.0",
+      "io.circe" %% "circe-optics"  % "0.15.0",
+
+      // Monocle (optics library)
+      "dev.optics" %% "monocle-core" % "3.2.0",
+
+      // ZIO HTTP
+      "dev.zio" %% "zio-http" % "3.0.1",
+
+      // Jinja2 templating
+      "com.hubspot.jinjava" % "jinjava" % "2.7.2",
+
+      // Testing
+      "dev.zio" %% "zio-test"     % zioVersion % Test,
+      "dev.zio" %% "zio-test-sbt" % zioVersion % Test
+    ),
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework")
   )
 
 lazy val examples = project

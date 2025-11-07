@@ -78,6 +78,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
             connectorVersion = "1.0.0",
             connectorConfigHash = "hash1",
             streamConfigHash = "hash2",
+            streamName = "test-stream",
             stateVersion = 1L,
             payload = """{"user":"alice"}"""
           )
@@ -89,14 +90,15 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         // Commit with state
         state        = """{"cursor":"page_1"}"""
         stateVersion = 1L
-        _ <- catalog.commitTransaction(namespace, tableName, state, stateVersion)
+        streamName   = "test-stream"
+        _ <- catalog.commitTransaction(namespace, tableName, state, stateVersion, streamName)
 
         // Read state back
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
         dataFile.recordCount == 1,
-        maybeSummary.contains((state, stateVersion))
+        maybeSummary.contains((state, stateVersion, streamName))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("state version mismatch returns empty summary") {
@@ -137,6 +139,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
             connectorVersion = "1.0",
             connectorConfigHash = "h1",
             streamConfigHash = "h2",
+            streamName = "test-stream",
             stateVersion = 1L,
             payload = """{"id":1}"""
           )
@@ -154,6 +157,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
             connectorVersion = "1.0",
             connectorConfigHash = "h1",
             streamConfigHash = "h2",
+            streamName = "test-stream",
             stateVersion = 1L,
             payload = """{"id":2}"""
           )
@@ -162,7 +166,8 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
 
         // Commit both batches atomically
         finalState = """{"done":true}"""
-        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L)
+        streamName = "test-stream"
+        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L, streamName)
 
         // Verify state
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
@@ -170,7 +175,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
       } yield assertTrue(
         file1.recordCount == 1,
         file2.recordCount == 1,
-        maybeSummary.contains((finalState, 1L))
+        maybeSummary.contains((finalState, 1L, streamName))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("commit with no staged files still persists state") {
@@ -186,13 +191,14 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         // Commit without writing any files - simulates connector doing work but finding no new data
         // This is CRITICAL: we must save state even if there are no records to avoid redoing expensive work
         finalState = """{"cursor":"exhausted","checked_at":"2025-11-01T10:00:00Z"}"""
-        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L)
+        streamName = "test-stream"
+        _ <- catalog.commitTransaction(namespace, tableName, finalState, 1L, streamName)
 
         // State MUST be persisted even though no data files were written
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
-        maybeSummary.contains((finalState, 1L))
+        maybeSummary.contains((finalState, 1L, streamName))
       )).provide(catalogForTable(namespace, tableName))
     }
   ) @@ TestAspect.sequential // Run tests sequentially to avoid container issues

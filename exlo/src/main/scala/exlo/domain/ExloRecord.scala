@@ -30,6 +30,8 @@ import java.util.UUID
  *   Hash of connector configuration
  * @param streamConfigHash
  *   Hash of stream configuration
+ * @param streamName
+ *   Name of the stream this record belongs to (e.g., "orders", "customers")
  * @param stateVersion
  *   State version this record belongs to
  * @param payload
@@ -44,6 +46,7 @@ case class ExloRecord(
   connectorVersion: String,
   connectorConfigHash: String,
   streamConfigHash: String,
+  streamName: String,
   stateVersion: Long,
   payload: String
 )

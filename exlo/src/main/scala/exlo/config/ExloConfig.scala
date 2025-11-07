@@ -10,10 +10,13 @@ import zio.config.magnolia.*
  *   Iceberg namespace for this stream's table
  * @param tableName
  *   Iceberg table name for this stream
+ * @param streamName
+ *   Stream name for this execution (required for YAML connectors, helps with provenance tracking)
  */
 final case class StreamConfig(
   namespace: String,
-  tableName: String
+  tableName: String,
+  streamName: String
 )
 
 object StreamConfig:

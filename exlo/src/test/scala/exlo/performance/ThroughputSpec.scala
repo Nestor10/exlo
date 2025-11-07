@@ -59,7 +59,8 @@ object ThroughputSpec extends ZIOSpecDefault:
           .withConfigProvider(configProvider)
           .provideSome[IcebergCatalog](
             ZLayer.succeed(connector),
-            tableLayer(namespace, tableName),
+            tableLayer(namespace, tableName, "test-stream"),
+            buildStreamConfig(namespace, tableName, "test-stream"),
             ZLayer.succeed(StateConfig(version = 1L))
           )
         endTime <- Clock.instant
@@ -128,7 +129,8 @@ object ThroughputSpec extends ZIOSpecDefault:
           .withConfigProvider(configProvider)
           .provideSome[IcebergCatalog](
             ZLayer.succeed(connector),
-            tableLayer(namespace, tableName),
+            tableLayer(namespace, tableName, "test-stream"),
+            buildStreamConfig(namespace, tableName, "test-stream"),
             ZLayer.succeed(StateConfig(version = 1L))
           )
         endTime   <- Clock.instant
@@ -187,7 +189,8 @@ object ThroughputSpec extends ZIOSpecDefault:
           .withConfigProvider(configProvider1k)
           .provideSome[IcebergCatalog](
             ZLayer.succeed(connector1k),
-            tableLayer(namespace, tableName1k),
+            tableLayer(namespace, tableName1k, "test-stream"),
+            buildStreamConfig(namespace, tableName1k, "test-stream"),
             ZLayer.succeed(StateConfig(version = 1L))
           )
         end1k   <- Clock.instant
@@ -210,7 +213,8 @@ object ThroughputSpec extends ZIOSpecDefault:
           .withConfigProvider(configProvider10k)
           .provideSome[IcebergCatalog](
             ZLayer.succeed(connector10k),
-            tableLayer(namespace, tableName10k),
+            tableLayer(namespace, tableName10k, "test-stream"),
+            buildStreamConfig(namespace, tableName10k, "test-stream"),
             ZLayer.succeed(StateConfig(version = 1L))
           )
         end10k   <- Clock.instant
@@ -275,17 +279,18 @@ object ThroughputSpec extends ZIOSpecDefault:
           .flattenChunks
 
   /** Build Table layer for testing (doesn't load config from environment). */
-  private def tableLayer(namespace: String, tableName: String) =
+  private def tableLayer(namespace: String, tableName: String, streamName: String) =
     ZLayer.fromZIO(
-      ZIO.service[IcebergCatalog].map(catalog => Table.Live(namespace, tableName, catalog))
+      ZIO.service[IcebergCatalog].map(catalog => Table.Live(namespace, tableName, streamName, catalog))
     )
 
   /** Build StreamConfig layer for testing. */
-  private def buildStreamConfig(namespace: String, tableName: String) =
+  private def buildStreamConfig(namespace: String, tableName: String, streamName: String) =
     ZLayer.succeed(
       exlo.config.StreamConfig(
         namespace = namespace,
-        tableName = tableName
+        tableName = tableName,
+        streamName = streamName
       )
     )
 

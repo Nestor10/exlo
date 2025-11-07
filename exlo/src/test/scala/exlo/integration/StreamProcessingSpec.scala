@@ -36,10 +36,17 @@ object StreamProcessingSpec extends ZIOSpecDefault:
 
   val testStateConfig = StateConfig(version = 1L)
 
+  val testStreamConfig = StreamConfig(
+    namespace = "test",
+    tableName = "test_table",
+    streamName = "test-stream"
+  )
+
   val testConfigProvider = exlo.config.ExloConfigProvider.fromMap(
     Map(
       "EXLO_STREAM_NAMESPACE"  -> "test",
-      "EXLO_STREAM_TABLE_NAME" -> "test_table"
+      "EXLO_STREAM_TABLE_NAME" -> "test_table",
+      "EXLO_STREAM_STREAM_NAME" -> "test-stream"
     )
   )
 
@@ -71,7 +78,8 @@ object StreamProcessingSpec extends ZIOSpecDefault:
       StubConnector.layer,
       Table.Stub.layer,
       IcebergCatalog.Stub.layer,
-      ZLayer.succeed(testStateConfig)
+      ZLayer.succeed(testStateConfig),
+      ZLayer.succeed(testStreamConfig)
     ),
     test("empty stream produces no commits") {
       // Edge case: connector emits no elements
@@ -97,7 +105,8 @@ object StreamProcessingSpec extends ZIOSpecDefault:
       }),
       Table.Stub.layer,
       IcebergCatalog.Stub.layer,
-      ZLayer.succeed(testStateConfig)
+      ZLayer.succeed(testStateConfig),
+      ZLayer.succeed(testStreamConfig)
     ),
     test("stream with only data (no checkpoints) produces no commits") {
       // Edge case: user forgets to emit checkpoints
@@ -127,7 +136,8 @@ object StreamProcessingSpec extends ZIOSpecDefault:
       }),
       Table.Stub.layer,
       IcebergCatalog.Stub.layer,
-      ZLayer.succeed(testStateConfig)
+      ZLayer.succeed(testStateConfig),
+      ZLayer.succeed(testStreamConfig)
     ),
     test("reads initial state and passes to connector") {
       // Verify that pipeline reads state from table and passes to connector
@@ -158,7 +168,8 @@ object StreamProcessingSpec extends ZIOSpecDefault:
               )
             ),
             IcebergCatalog.Stub.layer,
-            ZLayer.succeed(testStateConfig)
+            ZLayer.succeed(testStateConfig),
+            ZLayer.succeed(testStreamConfig)
           )
 
         capturedState <- stateRef.get

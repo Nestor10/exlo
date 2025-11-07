@@ -124,20 +124,20 @@ trait IcebergCatalog:
   /**
    * Read EXLO state metadata from the table's current snapshot.
    *
-   * Returns the connector state and version persisted in the latest snapshot's summary. Used for
-   * incremental sync to resume from last checkpoint.
+   * Returns the connector state, version, and stream name persisted in the latest snapshot's
+   * summary. Used for incremental sync to resume from last checkpoint.
    *
    * @param namespace
    *   Iceberg namespace
    * @param tableName
    *   Iceberg table name
    * @return
-   *   Tuple of (state: String, stateVersion: Long) or None if no snapshots exist
+   *   Tuple of (state: String, stateVersion: Long, streamName: String) or None if no snapshots exist
    */
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): IO[ExloError, Option[(String, Long)]]
+  ): IO[ExloError, Option[(String, Long, String)]]
 
   /**
    * Write a batch of ExloRecords to a Parquet file and stage it in the active transaction.
@@ -182,6 +182,8 @@ trait IcebergCatalog:
    *   State as JSON string to store in snapshot summary
    * @param stateVersion
    *   State version for invalidation tracking
+   * @param streamName
+   *   Stream name to store in snapshot summary for validation
    * @return
    *   Effect that succeeds if commit succeeds
    */
@@ -189,7 +191,8 @@ trait IcebergCatalog:
     namespace: String,
     tableName: String,
     state: String,
-    stateVersion: Long
+    stateVersion: Long,
+    streamName: String
   ): IO[ExloError, Unit]
 
 object IcebergCatalog:
@@ -213,8 +216,9 @@ object IcebergCatalog:
       Types.NestedField.required(6, "connector_version", Types.StringType.get()),
       Types.NestedField.required(7, "connector_config_hash", Types.StringType.get()),
       Types.NestedField.required(8, "stream_config_hash", Types.StringType.get()),
-      Types.NestedField.required(9, "state_version", Types.LongType.get()),
-      Types.NestedField.required(10, "payload", Types.StringType.get())
+      Types.NestedField.required(9, "stream_name", Types.StringType.get()),
+      Types.NestedField.required(10, "state_version", Types.LongType.get()),
+      Types.NestedField.required(11, "payload", Types.StringType.get())
     )
 
   /**
@@ -259,7 +263,7 @@ object IcebergCatalog:
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): ZIO[IcebergCatalog, ExloError, Option[(String, Long)]] =
+  ): ZIO[IcebergCatalog, ExloError, Option[(String, Long, String)]] =
     ZIO.serviceWithZIO[IcebergCatalog](_.readSnapshotSummary(namespace, tableName))
 
   /**
@@ -298,7 +302,7 @@ object IcebergCatalog:
     def readSnapshotSummary(
       namespace: String,
       tableName: String
-    ): IO[ExloError, Option[(String, Long)]] =
+    ): IO[ExloError, Option[(String, Long, String)]] =
       for {
         table   <- catalogOps.loadTable(namespace, tableName)
         summary <- writer.readSnapshotSummary(table)
@@ -318,11 +322,12 @@ object IcebergCatalog:
       namespace: String,
       tableName: String,
       state: String,
-      stateVersion: Long
+      stateVersion: Long,
+      streamName: String
     ): IO[ExloError, Unit] =
       for {
         table <- catalogOps.loadTable(namespace, tableName)
-        _     <- writer.commitTransaction(table, state, stateVersion)
+        _     <- writer.commitTransaction(table, state, stateVersion, streamName)
       } yield ()
 
   object Live:
@@ -373,15 +378,16 @@ object IcebergCatalog:
     def readSnapshotSummary(
       namespace: String,
       tableName: String
-    ): IO[ExloError, Option[(String, Long)]] =
+    ): IO[ExloError, Option[(String, Long, String)]] =
       val key = s"$namespace.$tableName"
       ZIO.succeed {
         snapshotSummaries.get(key).flatMap { summary =>
           for {
             state        <- summary.get("exlo.state")
             versionStr   <- summary.get("exlo.state.version")
+            streamName   <- summary.get("exlo.state.stream_name")
             stateVersion <- versionStr.toLongOption
-          } yield (state, stateVersion)
+          } yield (state, stateVersion, streamName)
         }
       }
 
@@ -410,7 +416,8 @@ object IcebergCatalog:
       namespace: String,
       tableName: String,
       state: String,
-      stateVersion: Long
+      stateVersion: Long,
+      streamName: String
     ): IO[ExloError, Unit] =
       ZIO.succeed {
         val key = s"$namespace.$tableName"
@@ -418,8 +425,9 @@ object IcebergCatalog:
         snapshotSummaries = snapshotSummaries.updated(
           key,
           Map(
-            "exlo.state"         -> state,
-            "exlo.state.version" -> stateVersion.toString
+            "exlo.state"              -> state,
+            "exlo.state.version"      -> stateVersion.toString,
+            "exlo.state.stream_name"  -> streamName
           )
         )
         // Clear staged files for this table (simulating transaction commit)

@@ -1,5 +1,6 @@
 package exlo.pipeline
 
+import exlo.config.StreamConfig
 import exlo.domain.ExloRecord
 import exlo.domain.StateConfig
 import exlo.domain.SyncMetadata
@@ -41,11 +42,12 @@ object MetadataWrapper:
     syncMetadata: SyncMetadata,
     connectorId: String,
     connectorVersion: String
-  ): ZPipeline[StateConfig, Nothing, (Chunk[String], String), ExloRecord] =
+  ): ZPipeline[StateConfig & StreamConfig, Nothing, (Chunk[String], String), ExloRecord] =
     ZPipeline.mapChunksZIO { batches =>
       for
-        stateConfig <- ZIO.service[StateConfig]
-        now         <- Clock.instant
+        stateConfig  <- ZIO.service[StateConfig]
+        streamConfig <- ZIO.service[StreamConfig]
+        now          <- Clock.instant
         records = batches.flatMap {
           case (recordStrings, checkpointState) =>
             // Each batch gets a unique commitId (all records in batch share same commitId)
@@ -61,6 +63,7 @@ object MetadataWrapper:
                 connectorVersion = connectorVersion,
                 connectorConfigHash = "TODO", // Placeholder - implement in Phase 2
                 streamConfigHash = "TODO",    // Placeholder - implement in Phase 2
+                streamName = streamConfig.streamName,
                 stateVersion = stateConfig.version,
                 payload = payload
               )
@@ -79,12 +82,13 @@ object MetadataWrapper:
     syncMetadata: SyncMetadata,
     connectorId: String,
     connectorVersion: String
-  ): ZPipeline[StateConfig, Nothing, (Chunk[String], String), (Chunk[ExloRecord], String)] =
+  ): ZPipeline[StateConfig & StreamConfig, Nothing, (Chunk[String], String), (Chunk[ExloRecord], String)] =
     ZPipeline.mapZIO {
       case (recordStrings, checkpointState) =>
         for
-          stateConfig <- ZIO.service[StateConfig]
-          now         <- Clock.instant
+          stateConfig  <- ZIO.service[StateConfig]
+          streamConfig <- ZIO.service[StreamConfig]
+          now          <- Clock.instant
           commitId = UUID.randomUUID() // All records in this batch share the same commitId
           records  = recordStrings.map { payload =>
             ExloRecord(
@@ -96,6 +100,7 @@ object MetadataWrapper:
               connectorVersion = connectorVersion,
               connectorConfigHash = "TODO", // Placeholder - implement in Phase 2
               streamConfigHash = "TODO",    // Placeholder - implement in Phase 2
+              streamName = streamConfig.streamName,
               stateVersion = stateConfig.version,
               payload = payload
             )
