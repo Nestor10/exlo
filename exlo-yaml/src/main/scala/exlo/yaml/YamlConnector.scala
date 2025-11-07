@@ -74,7 +74,7 @@ object YamlConnector extends ExloApp:
           spec <- YamlSpecLoader.loadSpec(specPath)
 
           // Validate at least one stream exists
-          _ <- ZIO.when(spec.streams.isEmpty)(
+          _          <- ZIO.when(spec.streams.isEmpty)(
             ZIO.fail(
               new RuntimeException("No streams defined in YAML spec")
             )

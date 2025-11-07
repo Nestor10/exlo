@@ -119,7 +119,7 @@ object Table:
               ZIO.fail(
                 ExloError.ConfigurationError(
                   s"Stream name mismatch: table $namespace.$tableName has state from stream '$storedStreamName' but current execution is for stream '$streamName'. " +
-                  s"This prevents accidental cross-stream contamination. Each stream should write to its own table."
+                    s"This prevents accidental cross-stream contamination. Each stream should write to its own table."
                 )
               )
             } else if (storedVersion == stateVersion) {
@@ -129,7 +129,7 @@ object Table:
               // Stream name matches but version mismatch → trigger fresh start
               ZIO.succeed("")
             }
-          case None =>
+          case None                                                 =>
             // No snapshot → trigger fresh start
             ZIO.succeed("")
         }

@@ -1,9 +1,11 @@
 package exlo.performance
 
 import exlo.domain.*
-import exlo.infra.{IcebergCatalog, NessieTestContainer}
+import exlo.infra.IcebergCatalog
+import exlo.infra.NessieTestContainer
 import exlo.pipeline.PipelineOrchestrator
-import exlo.service.{Connector, Table}
+import exlo.service.Connector
+import exlo.service.Table
 import zio.*
 import zio.stream.*
 import zio.test.*

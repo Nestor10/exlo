@@ -425,9 +425,9 @@ object IcebergCatalog:
         snapshotSummaries = snapshotSummaries.updated(
           key,
           Map(
-            "exlo.state"              -> state,
-            "exlo.state.version"      -> stateVersion.toString,
-            "exlo.state.stream_name"  -> streamName
+            "exlo.state"             -> state,
+            "exlo.state.version"     -> stateVersion.toString,
+            "exlo.state.stream_name" -> streamName
           )
         )
         // Clear staged files for this table (simulating transaction commit)

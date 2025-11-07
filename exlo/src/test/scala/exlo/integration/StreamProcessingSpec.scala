@@ -44,8 +44,8 @@ object StreamProcessingSpec extends ZIOSpecDefault:
 
   val testConfigProvider = exlo.config.ExloConfigProvider.fromMap(
     Map(
-      "EXLO_STREAM_NAMESPACE"  -> "test",
-      "EXLO_STREAM_TABLE_NAME" -> "test_table",
+      "EXLO_STREAM_NAMESPACE"   -> "test",
+      "EXLO_STREAM_TABLE_NAME"  -> "test_table",
       "EXLO_STREAM_STREAM_NAME" -> "test-stream"
     )
   )

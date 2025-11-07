@@ -61,7 +61,7 @@ trait IcebergWriter:
     records: Chunk[ExloRecord]
   ): IO[ExloError, DataFile]
 
-    /**
+  /**
    * Commit all staged files as a new snapshot with state metadata.
    *
    * This operation: 1. Retrieves the staged AppendFiles builder 2. Sets exlo.state,
