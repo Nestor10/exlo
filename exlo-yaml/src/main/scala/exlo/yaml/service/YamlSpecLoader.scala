@@ -1,6 +1,6 @@
 package exlo.yaml.service
 
-import exlo.yaml.YamlRuntimeError
+import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.ConnectorSpec
 import exlo.yaml.spec.given
 import io.circe.yaml.parser

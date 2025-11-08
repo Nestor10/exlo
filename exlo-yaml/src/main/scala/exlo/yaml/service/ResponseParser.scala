@@ -1,6 +1,6 @@
 package exlo.yaml.service
 
-import exlo.yaml.YamlRuntimeError
+import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.Extractor
 import io.circe.Json
 import io.circe.optics.JsonPath.*

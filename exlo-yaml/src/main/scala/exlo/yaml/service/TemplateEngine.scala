@@ -1,7 +1,7 @@
 package exlo.yaml.service
 
 import com.hubspot.jinjava.Jinjava
-import exlo.yaml.YamlRuntimeError
+import exlo.yaml.domain.YamlRuntimeError
 import zio.*
 
 import scala.jdk.CollectionConverters.*

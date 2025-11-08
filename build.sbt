@@ -96,6 +96,9 @@ lazy val exloYaml = project
       // Jinja2 templating
       "com.hubspot.jinjava" % "jinjava" % "2.7.2",
 
+      // JSON Schema validation
+      "com.networknt" % "json-schema-validator" % "1.5.5",
+
       // Testing
       "dev.zio" %% "zio-test"     % zioVersion % Test,
       "dev.zio" %% "zio-test-sbt" % zioVersion % Test

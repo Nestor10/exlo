@@ -1,6 +1,6 @@
 package exlo.yaml.service
 
-import exlo.yaml.YamlRuntimeError
+import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.Auth
 import io.circe.parser.*
 import zio.*

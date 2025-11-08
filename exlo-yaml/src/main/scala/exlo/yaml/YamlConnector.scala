@@ -91,15 +91,17 @@ object YamlConnector extends ExloApp:
         yield streamSpec
       }
       .flatMap { streamSpec =>
-        // Build template context for this stream
-        val context = buildContext(state)
-
-        // Interpret stream spec into record stream
-        YamlInterpreter
-          .interpretStream(streamSpec, context)
-          .map { json =>
-            // Convert JSON to StreamElement.Data
-            StreamElement.Data(json.noSpaces)
+        // Build template context for this stream (loads EXLO_CONFIG)
+        ZStream
+          .fromZIO(buildContext(state))
+          .flatMap { context =>
+            // Interpret stream spec into record stream
+            YamlInterpreter
+              .interpretStream(streamSpec, context)
+              .map { json =>
+                // Convert JSON to StreamElement.Data
+                StreamElement.Data(json.noSpaces)
+              }
           }
           .grouped(100) // Batch records for efficiency
           .flatMap { chunk =>
@@ -121,14 +123,64 @@ object YamlConnector extends ExloApp:
    *
    * Context is available to Jinja2 templates in the YAML spec.
    *
+   * Provides:
+   * - `state`: Parsed JSON state (empty if fresh start)
+   * - `config`: Connector-specific config from EXLO_CONNECTOR_CONFIG env var
+   *
+   * Example templates:
+   * - `{{ config.api_key }}` - Access API key from config
+   * - `{{ config.shop }}.myshopify.com` - Build URL with config value
+   * - `{{ state.cursor }}` - Access cursor from state
+   * - `{{ config.organization_ids }}` - Access array values (Snapchat example)
+   *
    * TODO Phase 2:
-   *   - Parse state JSON
-   *   - Load config from EXLO_CONFIG env vars
-   *   - Add pagination state (cursor, page, offset)
+   *   - Validate config against connection_specification JSON Schema
+   *   - Parse state JSON (currently just string)
+   *   - Add pagination context (cursor, page, offset)
    */
-  private def buildContext(state: String): Map[String, Any] =
-    Map(
-      "state" -> (if state.isEmpty then Map.empty else state)
-      // TODO: Add config values
-      // "config" -> configValues
+  private def buildContext(state: String): Task[Map[String, Any]] =
+    import exlo.yaml.infra.ConfigLoader
+    import scala.jdk.CollectionConverters.*
+
+    for
+      connectorConfig <- ConfigLoader.loadUnvalidated
+      // Convert Circe Json to Java Map for Jinja2
+      configMap  = circeJsonToJavaMap(connectorConfig.json)
+    yield Map(
+      "state"  -> (if state.isEmpty then Map.empty else state),
+      "config" -> configMap
     )
+
+  /** Convert Circe Json to java.util.Map for Jinja2. */
+  private def circeJsonToJavaMap(json: io.circe.Json): java.util.Map[String, Any] =
+    import io.circe.*
+    import scala.jdk.CollectionConverters.{MapHasAsJava, SeqHasAsJava}
+
+    json.asObject match
+      case Some(obj) =>
+        obj.toMap.view
+          .mapValues {
+            case j if j.isNull    => null
+            case j if j.isBoolean => j.asBoolean.get
+            case j if j.isNumber  =>
+              j.asNumber.flatMap(_.toLong.map(identity)).getOrElse(j.asNumber.get.toDouble)
+            case j if j.isString  => j.asString.get
+            case j if j.isArray   => j.asArray.get.toList.map(circeJsonToJavaValue).asJava
+            case j if j.isObject  => circeJsonToJavaMap(j)
+            case j                => j.noSpaces
+          }
+          .toMap
+          .asJava
+      case None      => Map.empty[String, Any].asJava
+
+  private def circeJsonToJavaValue(json: io.circe.Json): Any =
+    import scala.jdk.CollectionConverters.SeqHasAsJava
+    json match
+      case j if j.isNull    => null
+      case j if j.isBoolean => j.asBoolean.get
+      case j if j.isNumber  =>
+        j.asNumber.flatMap(_.toLong.map(identity)).getOrElse(j.asNumber.get.toDouble)
+      case j if j.isString  => j.asString.get
+      case j if j.isArray   => j.asArray.get.toList.map(circeJsonToJavaValue).asJava
+      case j if j.isObject  => circeJsonToJavaMap(j)
+      case j                => j.noSpaces

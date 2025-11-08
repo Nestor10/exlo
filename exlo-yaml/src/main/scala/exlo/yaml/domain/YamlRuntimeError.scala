@@ -1,4 +1,4 @@
-package exlo.yaml
+package exlo.yaml.domain
 
 /**
  * Typed errors for YAML runtime operations.
@@ -68,3 +68,14 @@ object YamlRuntimeError:
    */
   case class AuthError(cause: String) extends YamlRuntimeError:
     override def getMessage: String = s"Authentication error: $cause"
+
+  /**
+   * Config validation failed against JSON Schema.
+   *
+   * @param errors
+   *   List of validation errors from JSON Schema validator
+   */
+  case class ConfigValidationError(errors: List[String]) extends YamlRuntimeError:
+
+    override def getMessage: String =
+      s"Config validation failed:\n${errors.map(e => s"  - $e").mkString("\n")}"
