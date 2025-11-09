@@ -1,8 +1,10 @@
 package exlo.yaml.integration
 
+import exlo.yaml.infra.HttpClient
 import exlo.yaml.interpreter.YamlInterpreter
 import exlo.yaml.service.*
 import exlo.yaml.spec.*
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.http.Client
 import zio.test.*
@@ -41,10 +43,10 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
       yield assertTrue(
         records.nonEmpty,
         records.length == 10, // JSONPlaceholder has 10 users
-        records.head.asObject.isDefined,
-        firstUser.asObject.flatMap(_("id")).flatMap(_.asNumber).isDefined,
-        firstUser.asObject.flatMap(_("name")).flatMap(_.asString).isDefined,
-        firstUser.asObject.flatMap(_("email")).flatMap(_.asString).isDefined
+        records.head.isObject,
+        firstUser.has("id"),
+        firstUser.has("name"),
+        firstUser.has("email")
       )
     },
     test("extracts nested posts data") {
@@ -66,8 +68,8 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
           .runCollect
       yield assertTrue(
         records.length == 100, // JSONPlaceholder has 100 posts
-        records.head.asObject.flatMap(_("userId")).flatMap(_.asNumber).isDefined,
-        records.head.asObject.flatMap(_("title")).flatMap(_.asString).isDefined
+        records.head.has("userId"),
+        records.head.has("title")
       )
     },
     test("applies filter to records") {
@@ -92,9 +94,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
           .runCollect
 
         // All records should have userId = 1
-        userIds = records.flatMap(
-          _.asObject.flatMap(_("userId")).flatMap(_.asNumber).flatMap(_.toInt)
-        )
+        userIds = records.map(_.get("userId").asInt())
       yield assertTrue(
         userIds.forall(_ == 1),
         records.nonEmpty
@@ -115,11 +115,11 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
       )
 
       for records <- YamlInterpreter
-          .interpretStream(spec, Map("postId" -> 1))
+          .interpretStream(spec, Map[String, TemplateValue]("postId" -> TemplateValue.Num(1)))
           .runCollect
       yield assertTrue(
         records.nonEmpty,
-        records.head.asObject.flatMap(_("postId")).flatMap(_.asNumber).flatMap(_.toInt) == Some(1)
+        records.head.get("postId").asInt() == 1
       )
     }
   ).provide(
@@ -128,5 +128,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
     HttpClient.Live.layer,
     TemplateEngine.Live.layer,
     ResponseParser.Live.layer,
-    Authenticator.Live.layer
+    Authenticator.Live.layer,
+    ErrorHandlerService.live,
+    RequestExecutor.live
   ) @@ TestAspect.timeout(30.seconds) // Network calls can be slow

@@ -2,15 +2,28 @@ package exlo.yaml.service
 
 import com.hubspot.jinjava.Jinjava
 import exlo.yaml.domain.YamlRuntimeError
+import exlo.yaml.template.TemplateValue
 import zio.*
-
-import scala.jdk.CollectionConverters.*
 
 /**
  * Service for Jinja2 template rendering and evaluation.
  *
  * Provides Jinja2 compatibility for Airbyte-style YAML specs using Jinjava
  * (HubSpot's JVM implementation).
+ *
+ * Type Safety:
+ * Context values use the TemplateValue ADT which provides:
+ * - Compile-time type safety for all template values
+ * - Exhaustive pattern matching on supported types
+ * - Automatic conversion to Java types required by Jinjava
+ *
+ * The ADT supports:
+ * - TemplateValue.Str(String)
+ * - TemplateValue.Num(Int)
+ * - TemplateValue.Bool(Boolean)
+ * - TemplateValue.Obj(Map[String, TemplateValue])
+ * - TemplateValue.Arr(List[TemplateValue])
+ * - TemplateValue.Null
  */
 trait TemplateEngine:
 
@@ -20,13 +33,13 @@ trait TemplateEngine:
    * @param template
    *   Jinja2 template string
    * @param context
-   *   Variables available to template
+   *   Variables available to template using TemplateValue ADT
    * @return
    *   Rendered string
    */
   def render(
     template: String,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): IO[Throwable, String]
 
   /**
@@ -35,13 +48,13 @@ trait TemplateEngine:
    * @param condition
    *   Boolean expression (without {{ }})
    * @param context
-   *   Variables available to expression
+   *   Variables available to expression using TemplateValue ADT
    * @return
    *   Boolean result
    */
   def evaluateCondition(
     condition: String,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): IO[Throwable, Boolean]
 
 object TemplateEngine:
@@ -53,7 +66,7 @@ object TemplateEngine:
    */
   def render(
     template: String,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZIO[TemplateEngine, Throwable, String] =
     ZIO.serviceWithZIO[TemplateEngine](_.render(template, context))
 
@@ -64,7 +77,7 @@ object TemplateEngine:
    */
   def evaluateCondition(
     condition: String,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZIO[TemplateEngine, Throwable, Boolean] =
     ZIO.serviceWithZIO[TemplateEngine](_.evaluateCondition(condition, context))
 
@@ -73,11 +86,12 @@ object TemplateEngine:
 
     override def render(
       template: String,
-      context: Map[String, Any]
+      context: Map[String, TemplateValue]
     ): IO[Throwable, String] =
       ZIO
         .attempt {
-          jinjava.render(template, context.asJava)
+          val javaContext = TemplateValue.contextToJava(context)
+          jinjava.render(template, javaContext)
         }
         .mapError(e =>
           YamlRuntimeError.TemplateError(
@@ -88,12 +102,13 @@ object TemplateEngine:
 
     override def evaluateCondition(
       condition: String,
-      context: Map[String, Any]
+      context: Map[String, TemplateValue]
     ): IO[Throwable, Boolean] =
       ZIO
         .attempt {
+          val javaContext = TemplateValue.contextToJava(context)
           // Wrap condition in {{ }} for evaluation
-          val result = jinjava.render(s"{{ $condition }}", context.asJava)
+          val result      = jinjava.render(s"{{ $condition }}", javaContext)
           // Parse result as boolean
           result.toLowerCase match
             case "true"  => true

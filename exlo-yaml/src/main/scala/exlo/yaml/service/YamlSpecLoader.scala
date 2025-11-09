@@ -1,9 +1,11 @@
 package exlo.yaml.service
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.ConnectorSpec
-import exlo.yaml.spec.given
-import io.circe.yaml.parser
 import zio.*
 
 import scala.io.Source
@@ -36,13 +38,23 @@ object YamlSpecLoader:
   def loadSpec(path: String): ZIO[YamlSpecLoader, Throwable, ConnectorSpec] =
     ZIO.serviceWithZIO[YamlSpecLoader](_.loadSpec(path))
 
-  /** Live implementation using circe-yaml for parsing. */
+  /** Live implementation using Jackson YAML parser. */
   case class Live() extends YamlSpecLoader:
+
+    private val yamlMapper: YAMLMapper =
+      val mapper = new YAMLMapper()
+      mapper.registerModule(DefaultScalaModule)
+      mapper
+
+    private val jsonMapper: ObjectMapper =
+      val mapper = new ObjectMapper()
+      mapper.registerModule(DefaultScalaModule)
+      mapper
 
     override def loadSpec(path: String): IO[Throwable, ConnectorSpec] =
       for
         // Read file content
-        content <- ZIO
+        content  <- ZIO
           .attemptBlocking {
             val source = Source.fromFile(path)
             try source.mkString
@@ -55,9 +67,9 @@ object YamlSpecLoader:
             )
           )
 
-        // Parse YAML to JSON
-        json    <- ZIO
-          .fromEither(parser.parse(content))
+        // Parse YAML to JsonNode
+        jsonNode <- ZIO
+          .attempt(yamlMapper.readTree(content))
           .mapError(e =>
             YamlRuntimeError.InvalidSpec(
               path,
@@ -65,9 +77,9 @@ object YamlSpecLoader:
             )
           )
 
-        // Decode to ConnectorSpec
-        spec    <- ZIO
-          .fromEither(json.as[ConnectorSpec])
+        // Deserialize JsonNode to ConnectorSpec
+        spec     <- ZIO
+          .attempt(jsonMapper.treeToValue(jsonNode, classOf[ConnectorSpec]))
           .mapError(e =>
             YamlRuntimeError.InvalidSpec(
               path,

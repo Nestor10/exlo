@@ -14,7 +14,8 @@ streams:
     
     recordSelector:
       extractor:
-        fieldPath: []  # Root level is already an array of users
+        type: DpathExtractor
+        field_path: []  # Root level is already an array of users
       filter: null  # No filtering
     
     paginator:

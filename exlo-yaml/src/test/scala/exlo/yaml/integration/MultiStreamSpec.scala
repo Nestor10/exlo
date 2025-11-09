@@ -1,12 +1,16 @@
 package exlo.yaml.integration
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import exlo.config.ExloConfigProvider
 import exlo.config.StreamConfig
 import exlo.domain.StreamElement
 import exlo.yaml.YamlConnector
+import exlo.yaml.infra.HttpClient
 import exlo.yaml.interpreter.YamlInterpreter
 import exlo.yaml.service.*
-import io.circe.parser.*
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.http.*
 import zio.stream.*
@@ -25,6 +29,14 @@ import java.nio.file.Paths
  */
 object MultiStreamSpec extends ZIOSpecDefault:
 
+  private val jsonMapper: ObjectMapper =
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
+    mapper
+
+  private def parseJson(jsonString: String): JsonNode =
+    jsonMapper.readTree(jsonString)
+
   def spec = suite("Multiple Streams Support")(
     test("selects specific stream by name") {
       val yaml = """
@@ -39,7 +51,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -55,7 +68,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -86,11 +100,11 @@ object MultiStreamSpec extends ZIOSpecDefault:
             yield streamSpec
           }
           .flatMap { streamSpec =>
-            val context = Map.empty[String, Any]
+            val context = Map.empty[String, TemplateValue]
 
             YamlInterpreter
               .interpretStream(streamSpec, context)
-              .map(json => StreamElement.Data(json.noSpaces))
+              .map(json => StreamElement.Data(json.toString))
           }
           .take(5)
           .runCollect
@@ -99,12 +113,12 @@ object MultiStreamSpec extends ZIOSpecDefault:
 
         // Parse and verify records
         dataElements = elements.collect { case d: StreamElement.Data => d }
-        parsedRecords <- ZIO.foreach(dataElements)(data => ZIO.fromEither(parse(data.record)))
+        parsedRecords <- ZIO.foreach(dataElements)(data => ZIO.attempt(parseJson(data.record)))
       yield assertTrue(
         parsedRecords.nonEmpty,
-        parsedRecords.size == 5,                                          // Limited to 5 posts
-        parsedRecords.head.hcursor.downField("title").as[String].isRight, // Posts have title
-        parsedRecords.head.hcursor.downField("name").as[String].isLeft    // Posts don't have name (users do)
+        parsedRecords.size == 5,         // Limited to 5 posts
+        parsedRecords.head.has("title"), // Posts have title
+        !parsedRecords.head.has("name")  // Posts don't have name (users do)
       )
     }.provide(
       Client.default,
@@ -112,7 +126,9 @@ object MultiStreamSpec extends ZIOSpecDefault:
       HttpClient.Live.layer,
       TemplateEngine.Live.layer,
       ResponseParser.Live.layer,
-      Authenticator.Live.layer
+      Authenticator.Live.layer,
+      ErrorHandlerService.live,
+      RequestExecutor.live
     ),
     test("fails when stream name not found") {
       val yaml = """
@@ -127,7 +143,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -166,10 +183,12 @@ object MultiStreamSpec extends ZIOSpecDefault:
     }.provide(
       Client.default,
       YamlSpecLoader.Live.layer,
+      RequestExecutor.live,
       HttpClient.Live.layer,
       TemplateEngine.Live.layer,
       ResponseParser.Live.layer,
-      Authenticator.Live.layer
+      Authenticator.Live.layer,
+      ErrorHandlerService.live
     ),
     test("defaults to first stream when no name specified") {
       val yaml = """
@@ -184,7 +203,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -199,7 +219,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -225,11 +246,11 @@ object MultiStreamSpec extends ZIOSpecDefault:
             yield streamSpec
           }
           .flatMap { streamSpec =>
-            val context = Map.empty[String, Any]
+            val context = Map.empty[String, TemplateValue]
 
             YamlInterpreter
               .interpretStream(streamSpec, context)
-              .map(json => StreamElement.Data(json.noSpaces))
+              .map(json => StreamElement.Data(json.toString))
           }
           .take(5)
           .runCollect
@@ -237,10 +258,10 @@ object MultiStreamSpec extends ZIOSpecDefault:
           .someOrFailException
 
         dataElements = elements.collect { case d: StreamElement.Data => d }
-        parsedRecords <- ZIO.foreach(dataElements)(data => ZIO.fromEither(parse(data.record)))
+        parsedRecords <- ZIO.foreach(dataElements)(data => ZIO.attempt(parseJson(data.record)))
       yield assertTrue(
         parsedRecords.nonEmpty,
-        parsedRecords.head.hcursor.downField("email").as[String].isRight // Comments have email
+        parsedRecords.head.has("email") // Comments have email
       )
     }.provide(
       Client.default,
@@ -248,6 +269,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
       HttpClient.Live.layer,
       TemplateEngine.Live.layer,
       ResponseParser.Live.layer,
-      Authenticator.Live.layer
+      Authenticator.Live.layer,
+      ErrorHandlerService.live,
+      RequestExecutor.live
     )
   ) @@ TestAspect.timeout(60.seconds)

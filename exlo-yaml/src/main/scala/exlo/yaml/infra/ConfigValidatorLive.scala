@@ -1,11 +1,11 @@
 package exlo.yaml.infra
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.networknt.schema.JsonSchemaFactory
 import com.networknt.schema.SpecVersion
 import com.networknt.schema.ValidationMessage
 import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.service.ConfigValidator
-import io.circe.Json
 import zio.*
 
 import scala.jdk.CollectionConverters.*
@@ -16,7 +16,7 @@ import scala.jdk.CollectionConverters.*
  * Design (Onion Architecture - Infrastructure Layer):
  * - Implements ConfigValidator service trait
  * - Uses external library (json-schema-validator) for validation
- * - Converts between Circe Json and Jackson JsonNode
+ * - Works directly with Jackson JsonNode (zero conversion overhead)
  * - Provides ZLayer for dependency injection
  *
  * Validates user config against connector's JSON Schema (connection_specification).
@@ -33,20 +33,16 @@ final class ConfigValidatorLive extends ConfigValidator:
   private val schemaFactory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V7)
 
   override def validate(
-    config: Json,
-    schema: Json
-  ): IO[YamlRuntimeError.ConfigValidationError, Json] =
+    config: JsonNode,
+    schema: JsonNode
+  ): IO[YamlRuntimeError.ConfigValidationError, JsonNode] =
     ZIO
       .attempt {
-        // Convert Circe Json to Jackson JsonNode
-        val configNode = circeToJackson(config)
-        val schemaNode = circeToJackson(schema)
+        // Create JSON Schema validator from schema
+        val jsonSchema = schemaFactory.getSchema(schema)
 
-        // Create JSON Schema validator
-        val jsonSchema = schemaFactory.getSchema(schemaNode)
-
-        // Validate
-        val validationMessages: java.util.Set[ValidationMessage] = jsonSchema.validate(configNode)
+        // Validate config against schema
+        val validationMessages: java.util.Set[ValidationMessage] = jsonSchema.validate(config)
 
         if validationMessages.isEmpty then config // Valid!
         else
@@ -61,16 +57,6 @@ final class ConfigValidatorLive extends ConfigValidator:
         case e: YamlRuntimeError.ConfigValidationError =>
           e
       }
-
-  /**
-   * Convert Circe Json to Jackson JsonNode.
-   *
-   * networknt json-schema-validator uses Jackson internally, so we need to convert.
-   */
-  private def circeToJackson(json: Json): com.fasterxml.jackson.databind.JsonNode =
-    import com.fasterxml.jackson.databind.ObjectMapper
-    val mapper = new ObjectMapper()
-    mapper.readTree(json.noSpaces)
 
 object ConfigValidatorLive:
 

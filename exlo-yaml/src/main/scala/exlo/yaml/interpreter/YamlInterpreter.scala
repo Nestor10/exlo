@@ -1,13 +1,14 @@
 package exlo.yaml.interpreter
 
+import com.fasterxml.jackson.databind.JsonNode
 import exlo.domain.StreamElement
+import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.service.*
 import exlo.yaml.spec.*
-import io.circe.Json
+import exlo.yaml.template.TemplateValue
+import exlo.yaml.util.JsonUtils
 import zio.*
 import zio.stream.*
-
-import scala.jdk.CollectionConverters.*
 
 /**
  * Interprets YAML spec ADTs into executable ZIO effects.
@@ -15,9 +16,12 @@ import scala.jdk.CollectionConverters.*
  * Following functional programming principles: pure interpreter functions that
  * convert data (ADTs) into behavior (ZIO effects).
  *
- * The interpreter depends on services (HttpClient, TemplateEngine, etc.) via
- * ZIO environment, following Zionomicon Chapter 17 dependency injection
- * patterns.
+ * The interpreter depends on services via ZIO environment, following
+ * Zionomicon Chapter 17 dependency injection patterns.
+ *
+ * Request execution is delegated to RequestExecutor service, which handles
+ * all cross-cutting concerns (template rendering, auth, retry, rate limiting).
+ * This interpreter focuses purely on pagination logic.
  */
 object YamlInterpreter:
 
@@ -25,8 +29,7 @@ object YamlInterpreter:
    * Interpret a StreamSpec into a stream of JSON records.
    *
    * This is the main entry point that orchestrates:
-   *   1. Build initial HTTP request from Requester
-   *   1. Execute request with pagination
+   *   1. Execute request with pagination (via RequestExecutor)
    *   1. Extract records from each response
    *   1. Apply optional filters
    *
@@ -35,21 +38,21 @@ object YamlInterpreter:
    * @param context
    *   Template context (config values, state)
    * @return
-   *   Stream of JSON records
+   *   Stream of JsonNode records
    */
   def interpretStream(
     spec: StreamSpec,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZStream[
-    HttpClient & TemplateEngine & ResponseParser & Authenticator,
+    RequestExecutor & TemplateEngine & ResponseParser,
     Throwable,
-    Json
+    JsonNode
   ] =
     spec.paginator match
       case PaginationStrategy.NoPagination =>
         // Single page - execute once
         ZStream
-          .fromZIO(executeRequest(spec.requester, context))
+          .fromZIO(ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, context)))
           .flatMap(response => extractRecords(response, spec.recordSelector, context))
 
       case pageIncrement: PaginationStrategy.PageIncrement =>
@@ -60,66 +63,6 @@ object YamlInterpreter:
 
       case cursorPagination: PaginationStrategy.CursorPagination =>
         interpretCursorPagination(spec, cursorPagination, context)
-
-  /**
-   * Execute a single HTTP request with template rendering and auth.
-   *
-   * @param requester
-   *   Request specification
-   * @param context
-   *   Template context for rendering
-   * @return
-   *   JSON response
-   */
-  private def executeRequest(
-    requester: Requester,
-    context: Map[String, Any]
-  ): ZIO[
-    HttpClient & TemplateEngine & Authenticator,
-    Throwable,
-    Json
-  ] =
-    for
-      // Render URL template
-      url <- TemplateEngine.render(requester.url, context)
-
-      // Render header values
-      renderedHeaders <- ZIO
-        .foreach(requester.headers.toList) {
-          case (k, v) =>
-            TemplateEngine.render(v, context).map(k -> _)
-        }
-        .map(_.toMap)
-
-      // Render query parameter values
-      renderedParams  <- ZIO
-        .foreach(requester.params.toList) {
-          case (k, v) =>
-            TemplateEngine.render(v, context).map(k -> _)
-        }
-        .map(_.toMap)
-
-      // Apply authentication
-      headersWithAuth <- Authenticator.authenticate(
-        requester.auth,
-        renderedHeaders
-      )
-
-      // Render body template (if present)
-      renderedBody    <- requester.body match
-        case Some(bodyTemplate) =>
-          TemplateEngine.render(bodyTemplate, context).map(Some(_))
-        case None               => ZIO.succeed(None)
-
-      // Execute HTTP request
-      response        <- HttpClient.execute(
-        url,
-        requester.method,
-        headersWithAuth,
-        renderedParams,
-        renderedBody
-      )
-    yield response
 
   /**
    * Extract records from response using RecordSelector.
@@ -134,13 +77,13 @@ object YamlInterpreter:
    *   Stream of extracted JSON records
    */
   private def extractRecords(
-    response: Json,
+    response: JsonNode,
     selector: RecordSelector,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZStream[
     TemplateEngine & ResponseParser,
     Throwable,
-    Json
+    JsonNode
   ] =
     ZStream
       .fromIterableZIO(
@@ -150,8 +93,8 @@ object YamlInterpreter:
         selector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            // Add record to context for filter evaluation (convert to Java for Jinjava)
-            val filterContext = context + ("record" -> jsonToJava(record))
+            // Add record to context for filter evaluation
+            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
             TemplateEngine.evaluateCondition(filterExpr, filterContext)
       }
 
@@ -165,17 +108,17 @@ object YamlInterpreter:
   private def interpretPageIncrement(
     spec: StreamSpec,
     pagination: PaginationStrategy.PageIncrement,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZStream[
-    HttpClient & TemplateEngine & ResponseParser & Authenticator,
+    RequestExecutor & TemplateEngine & ResponseParser,
     Throwable,
-    Json
+    JsonNode
   ] =
     ZStream
       .unfoldZIO(pagination.startFrom) { pageNum =>
-        val pageContext = context + ("page" -> pageNum)
+        val pageContext = context + ("page" -> TemplateValue.Num(pageNum))
 
-        executeRequest(spec.requester, pageContext).flatMap { response =>
+        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, pageContext)).flatMap { response =>
           ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
             if records.isEmpty then
               // No more records - stop pagination
@@ -191,7 +134,8 @@ object YamlInterpreter:
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            val filterContext = context + ("record" -> jsonToJava(record))
+            import exlo.yaml.util.JsonUtils
+            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
             TemplateEngine.evaluateCondition(filterExpr, filterContext)
       }
 
@@ -205,17 +149,18 @@ object YamlInterpreter:
   private def interpretOffsetIncrement(
     spec: StreamSpec,
     pagination: PaginationStrategy.OffsetIncrement,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZStream[
-    HttpClient & TemplateEngine & ResponseParser & Authenticator,
+    RequestExecutor & TemplateEngine & ResponseParser,
     Throwable,
-    Json
+    JsonNode
   ] =
     ZStream
       .unfoldZIO(0) { offset =>
-        val offsetContext = context + ("offset" -> offset) + ("limit" -> pagination.pageSize)
+        val offsetContext =
+          context + ("offset" -> TemplateValue.Num(offset)) + ("limit" -> TemplateValue.Num(pagination.pageSize))
 
-        executeRequest(spec.requester, offsetContext).flatMap { response =>
+        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, offsetContext)).flatMap { response =>
           ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
             if records.isEmpty then
               // No more records - stop pagination
@@ -231,7 +176,8 @@ object YamlInterpreter:
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            val filterContext = context + ("record" -> jsonToJava(record))
+            import exlo.yaml.util.JsonUtils
+            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
             TemplateEngine.evaluateCondition(filterExpr, filterContext)
       }
 
@@ -246,24 +192,24 @@ object YamlInterpreter:
   private def interpretCursorPagination(
     spec: StreamSpec,
     pagination: PaginationStrategy.CursorPagination,
-    context: Map[String, Any]
+    context: Map[String, TemplateValue]
   ): ZStream[
-    HttpClient & TemplateEngine & ResponseParser & Authenticator,
+    RequestExecutor & TemplateEngine & ResponseParser,
     Throwable,
-    Json
+    JsonNode
   ] =
     ZStream
       .unfoldZIO(Option.empty[String]) { maybeCursor =>
         val cursorContext = maybeCursor match
-          case Some(cursor) => context + ("next_page_token" -> cursor)
+          case Some(cursor) => context + ("next_page_token" -> TemplateValue.Str(cursor))
           case None         => context
 
-        executeRequest(spec.requester, cursorContext).flatMap { response =>
+        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, cursorContext)).flatMap { response =>
           for
             // Check stop condition
             shouldStop <- TemplateEngine.evaluateCondition(
               pagination.stopCondition,
-              context + ("response" -> response)
+              context + ("response" -> TemplateValue.fromJsonNode(response))
             )
 
             result <-
@@ -279,7 +225,7 @@ object YamlInterpreter:
                   // Extract next cursor
                   nextCursor <- TemplateEngine.render(
                     pagination.cursorValue,
-                    context + ("response" -> jsonToJava(response))
+                    context + ("response" -> TemplateValue.fromJsonNode(response))
                   )
                 yield Some((records, Some(nextCursor)))
           yield result
@@ -290,22 +236,7 @@ object YamlInterpreter:
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            val filterContext = context + ("record" -> jsonToJava(record))
+            import exlo.yaml.util.JsonUtils
+            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
             TemplateEngine.evaluateCondition(filterExpr, filterContext)
       }
-
-  /**
-   * Convert Circe Json to Java objects for Jinjava.
-   *
-   * Jinjava expects Java objects (Map, List, primitives), not Scala/Circe
-   * types.
-   */
-  private def jsonToJava(json: Json): Any =
-    json.fold(
-      jsonNull = null,
-      jsonBoolean = identity,
-      jsonNumber = n => n.toInt.orElse(n.toLong).getOrElse(n.toDouble),
-      jsonString = identity,
-      jsonArray = arr => arr.map(jsonToJava).asJava,
-      jsonObject = obj => obj.toMap.view.mapValues(jsonToJava).toMap.asJava
-    )

@@ -1,6 +1,6 @@
 package exlo.yaml.domain
 
-import io.circe.Json
+import com.fasterxml.jackson.databind.JsonNode
 
 /**
  * Connector-specific configuration values.
@@ -15,10 +15,12 @@ import io.circe.Json
  * - Made available to Jinja2 templates as {{ config }}
  *
  * Type Choice:
- * - Uses io.circe.Json (not Map[String, String]) to support full JSON Schema
+ * - Uses Jackson JsonNode (not io.circe.Json or Map[String, String])
  * - Supports arrays: organization_ids: ["org1", "org2"]
  * - Supports nested objects: credentials: { type: "oauth", client_id: "..." }
  * - Supports all JSON types: strings, numbers, booleans, nulls, arrays, objects
+ * - Zero conversion overhead with json-schema-validator (uses Jackson)
+ * - Jinjava requires conversion: use JsonUtils.toAny to convert JsonNode → Java Objects
  *
  * Rationale:
  * YAML connectors define their own config schema using full JSON Schema spec.
@@ -45,7 +47,7 @@ import io.circe.Json
  *     }
  * }}}
  *
- * @param json
- *   Validated JSON configuration object
+ * @param node
+ *   Validated JSON configuration object (Jackson JsonNode)
  */
-case class ConnectorConfig(json: Json)
+case class ConnectorConfig(node: JsonNode)

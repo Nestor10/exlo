@@ -1,7 +1,6 @@
 package exlo.yaml.infra
 
-import io.circe.Json
-import io.circe.parser.parse
+import com.fasterxml.jackson.databind.{JsonNode, ObjectMapper}
 import zio.*
 import exlo.yaml.domain.{ConnectorConfig, YamlRuntimeError}
 import exlo.yaml.service.ConfigValidator
@@ -11,7 +10,7 @@ import exlo.yaml.service.ConfigValidator
  *
  * Design (Onion Architecture - Infrastructure Layer):
  * - Reads EXLO_CONNECTOR_CONFIG environment variable
- * - Parses JSON string to Circe Json
+ * - Parses JSON string to Jackson JsonNode
  * - Validates against connector's JSON Schema
  * - Returns validated ConnectorConfig domain model
  *
@@ -20,7 +19,7 @@ import exlo.yaml.service.ConfigValidator
  * 2. Parse as JSON (fail if invalid JSON)
  * 3. Extract connection_specification from resolved YAML spec
  * 4. Validate config against schema (fail if validation errors)
- * 5. Return ConnectorConfig(validatedJson)
+ * 5. Return ConnectorConfig(validatedJsonNode)
  *
  * Example:
  * {{{
@@ -36,6 +35,8 @@ import exlo.yaml.service.ConfigValidator
  */
 object ConfigLoader:
 
+  private val jsonMapper = new ObjectMapper()
+
   /**
    * Load config from EXLO_CONNECTOR_CONFIG and validate against schema.
    *
@@ -44,7 +45,7 @@ object ConfigLoader:
    * @return
    *   Validated ConnectorConfig
    */
-  def loadAndValidate(connectionSpec: Json): ZIO[ConfigValidator, YamlRuntimeError, ConnectorConfig] =
+  def loadAndValidate(connectionSpec: JsonNode): ZIO[ConfigValidator, YamlRuntimeError, ConnectorConfig] =
     (for
       // 1. Read env var
       configJsonString <- System
@@ -56,9 +57,9 @@ object ConfigLoader:
           )
         )
 
-      // 2. Parse JSON
-      configJson       <- ZIO
-        .fromEither(parse(configJsonString))
+      // 2. Parse JSON using Jackson
+      configNode       <- ZIO
+        .attempt(jsonMapper.readTree(configJsonString))
         .mapError(err =>
           YamlRuntimeError.InvalidSpec(
             "EXLO_CONNECTOR_CONFIG",
@@ -67,12 +68,12 @@ object ConfigLoader:
         )
 
       // 3. Validate against schema
-      validatedJson    <- ConfigValidator
-        .validate(configJson, connectionSpec)
+      validatedNode    <- ConfigValidator
+        .validate(configNode, connectionSpec)
         .mapError(e => e: YamlRuntimeError) // Widen to YamlRuntimeError
 
     // 4. Return domain model
-    yield ConnectorConfig(validatedJson)).refineToOrDie[YamlRuntimeError]
+    yield ConnectorConfig(validatedNode)).refineToOrDie[YamlRuntimeError]
 
   /**
    * Load config without validation (for testing or when schema not available).
@@ -87,7 +88,7 @@ object ConfigLoader:
           new RuntimeException("EXLO_CONNECTOR_CONFIG environment variable not set")
         )
 
-      configJson <- ZIO
-        .fromEither(parse(configJsonString))
+      configNode <- ZIO
+        .attempt(jsonMapper.readTree(configJsonString))
         .mapError(err => new RuntimeException(s"Invalid JSON in EXLO_CONNECTOR_CONFIG: ${err.getMessage}"))
-    yield ConnectorConfig(configJson)
+    yield ConnectorConfig(configNode)

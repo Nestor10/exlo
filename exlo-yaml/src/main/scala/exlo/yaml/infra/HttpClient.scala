@@ -1,23 +1,36 @@
-package exlo.yaml.service
+package exlo.yaml.infra
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
 import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.HttpMethod
-import io.circe.Json
-import io.circe.parser.*
 import zio.*
 import zio.http.*
 
 /**
- * Service for executing HTTP requests.
+ * HTTP client infrastructure.
  *
- * Handles GET/POST methods, headers, query parameters, and JSON response
- * parsing. Manages zio-http Client resources following Zionomicon Chapter 14
- * patterns.
+ * Pure infrastructure layer - wraps zio-http Client with no application-level
+ * concerns. Handles GET/POST methods, headers, query parameters, and JSON
+ * response parsing.
+ *
+ * Retry logic, rate limiting, and other business policies belong at the
+ * application layer (YamlInterpreter) where they can be composed and
+ * configured.
+ *
+ * Follows Zionomicon Chapter 14 patterns for resource management via Scope.
  */
 trait HttpClient:
 
   /**
    * Execute HTTP request and return JSON response.
+   *
+   * Returns typed errors for different failure modes:
+   *   - YamlRuntimeError.HttpError for HTTP failures (4xx, 5xx)
+   *   - YamlRuntimeError.ParseError for JSON parsing failures
+   *   - Network errors (connection failures, timeouts)
+   *
+   * Application layer should add retry logic as needed using .retry(schedule).
    *
    * @param url
    *   Target URL
@@ -30,7 +43,7 @@ trait HttpClient:
    * @param body
    *   Request body (for POST)
    * @return
-   *   Parsed JSON response
+   *   Parsed JSON response as Jackson JsonNode
    */
   def execute(
     url: String,
@@ -38,7 +51,7 @@ trait HttpClient:
     headers: Map[String, String],
     queryParams: Map[String, String],
     body: Option[String]
-  ): IO[Throwable, Json]
+  ): IO[Throwable, JsonNode]
 
 object HttpClient:
 
@@ -53,7 +66,7 @@ object HttpClient:
     headers: Map[String, String],
     queryParams: Map[String, String],
     body: Option[String]
-  ): ZIO[HttpClient, Throwable, Json] =
+  ): ZIO[HttpClient, Throwable, JsonNode] =
     ZIO.serviceWithZIO[HttpClient](
       _.execute(url, method, headers, queryParams, body)
     )
@@ -61,13 +74,15 @@ object HttpClient:
   /** Live implementation using zio-http Client. */
   case class Live(client: Client) extends HttpClient:
 
+    private val jsonMapper = new ObjectMapper()
+
     override def execute(
       url: String,
       method: HttpMethod,
       headers: Map[String, String],
       queryParams: Map[String, String],
       body: Option[String]
-    ): IO[Throwable, Json] =
+    ): IO[Throwable, JsonNode] =
       ZIO.scoped {
         for
           // Build URL with query parameters
@@ -117,17 +132,17 @@ object HttpClient:
             }
           }
 
-          // Parse JSON response
+          // Parse JSON response using Jackson
           bodyText <- response.body.asString
-          json     <- ZIO
-            .fromEither(parse(bodyText))
+          jsonNode <- ZIO
+            .attempt(jsonMapper.readTree(bodyText))
             .mapError(e =>
               YamlRuntimeError.ParseError(
                 url,
                 s"Failed to parse JSON: ${e.getMessage}"
               )
             )
-        yield json
+        yield jsonNode
       }
 
     private def buildUrlWithParams(

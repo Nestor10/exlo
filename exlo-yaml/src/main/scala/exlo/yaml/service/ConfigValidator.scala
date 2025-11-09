@@ -1,6 +1,6 @@
 package exlo.yaml.service
 
-import io.circe.Json
+import com.fasterxml.jackson.databind.JsonNode
 import zio.*
 import exlo.yaml.domain.YamlRuntimeError
 
@@ -18,27 +18,29 @@ import exlo.yaml.domain.YamlRuntimeError
  *
  * Example:
  * {{{
- * val schema = Json.obj(
- *   "type" -> Json.fromString("object"),
- *   "required" -> Json.arr(Json.fromString("client_id")),
- *   "properties" -> Json.obj(
- *     "client_id" -> Json.obj("type" -> Json.fromString("string")),
- *     "organization_ids" -> Json.obj(
- *       "type" -> Json.fromString("array"),
- *       "items" -> Json.obj("type" -> Json.fromString("string"))
- *     )
- *   )
- * )
+ * // Schema as Jackson JsonNode:
+ * {
+ *   "type": "object",
+ *   "required": ["client_id"],
+ *   "properties": {
+ *     "client_id": { "type": "string" },
+ *     "organization_ids": {
+ *       "type": "array",
+ *       "items": { "type": "string" }
+ *     }
+ *   }
+ * }
  *
- * val config = Json.obj(
- *   "client_id" -> Json.fromString("abc123"),
- *   "organization_ids" -> Json.arr(Json.fromString("org1"), Json.fromString("org2"))
- * )
+ * // Config as JsonNode:
+ * {
+ *   "client_id": "abc123",
+ *   "organization_ids": ["org1", "org2"]
+ * }
  *
  * validate(config, schema)  // Success(config)
  *
- * val badConfig = Json.obj("client_id" -> Json.fromInt(123))  // Wrong type
- * validate(badConfig, schema)  // Failure(ConfigValidationError)
+ * // Bad config: wrong type
+ * { "client_id": 123 }  // Failure(ConfigValidationError)
  * }}}
  */
 trait ConfigValidator:
@@ -53,8 +55,12 @@ trait ConfigValidator:
    * @return
    *   Validated config on success, ConfigValidationError on failure
    */
-  def validate(config: Json, schema: Json): IO[YamlRuntimeError.ConfigValidationError, Json]
+  def validate(config: JsonNode, schema: JsonNode): IO[YamlRuntimeError.ConfigValidationError, JsonNode]
 
 object ConfigValidator:
-  def validate(config: Json, schema: Json): ZIO[ConfigValidator, YamlRuntimeError.ConfigValidationError, Json] =
+
+  def validate(
+    config: JsonNode,
+    schema: JsonNode
+  ): ZIO[ConfigValidator, YamlRuntimeError.ConfigValidationError, JsonNode] =
     ZIO.serviceWithZIO[ConfigValidator](_.validate(config, schema))

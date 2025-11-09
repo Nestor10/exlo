@@ -10,6 +10,9 @@ package exlo.yaml
  */
 package object spec:
 
+  import com.fasterxml.jackson.annotation.{JsonProperty, JsonSubTypes, JsonTypeInfo}
+  import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+
   /**
    * HTTP method for API requests.
    */
@@ -21,6 +24,15 @@ package object spec:
    *
    * Sealed trait ensures exhaustive pattern matching at compile time.
    */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[Auth.NoAuth.type], name = "NoAuth"),
+      new JsonSubTypes.Type(value = classOf[Auth.ApiKey], name = "ApiKey"),
+      new JsonSubTypes.Type(value = classOf[Auth.Bearer], name = "Bearer"),
+      new JsonSubTypes.Type(value = classOf[Auth.OAuth], name = "OAuth")
+    )
+  )
   sealed trait Auth
 
   object Auth:
@@ -69,6 +81,140 @@ package object spec:
     ) extends Auth
 
   /**
+   * Response action for error handling.
+   *
+   * Determines how to handle HTTP responses based on status codes or error messages.
+   */
+  enum ResponseAction:
+    case SUCCESS, FAIL, IGNORE, RETRY
+
+  /**
+   * HTTP response filter for error handling.
+   *
+   * Filters responses based on HTTP status codes, error messages, or custom predicates.
+   *
+   * @param action
+   *   Action to take when filter matches
+   * @param httpCodes
+   *   List of HTTP status codes to match (e.g., [403, 404])
+   * @param errorMessageContains
+   *   Optional substring to match in error message
+   * @param predicate
+   *   Optional Jinja template boolean expression (e.g., "{{ 'code' in response }}")
+   */
+  case class HttpResponseFilter(
+    action: ResponseAction,
+    @JsonProperty("http_codes") httpCodes: List[Int] = List.empty,
+    @JsonProperty("error_message_contains") errorMessageContains: Option[String] = None,
+    predicate: Option[String] = None
+  )
+
+  /**
+   * Backoff strategy for retries.
+   *
+   * Sealed trait for compile-time exhaustiveness checking.
+   */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[BackoffStrategy.ExponentialBackoff], name = "ExponentialBackoffStrategy"),
+      new JsonSubTypes.Type(value = classOf[BackoffStrategy.ConstantBackoff], name = "ConstantBackoffStrategy"),
+      new JsonSubTypes.Type(value = classOf[BackoffStrategy.WaitTimeFromHeader], name = "WaitTimeFromHeader"),
+      new JsonSubTypes.Type(value = classOf[BackoffStrategy.WaitUntilTimeFromHeader], name = "WaitUntilTimeFromHeader")
+    )
+  )
+  sealed trait BackoffStrategy
+
+  object BackoffStrategy:
+    /**
+     * Exponential backoff with configurable factor.
+     *
+     * Wait time = factor * (2 ^ attempt_number) seconds
+     *
+     * @param factor
+     *   Multiplier for exponential backoff (default 5)
+     */
+    case class ExponentialBackoff(factor: Int = 5) extends BackoffStrategy
+
+    /**
+     * Constant backoff with fixed wait time.
+     *
+     * @param backoffTimeInSeconds
+     *   Fixed wait time between retries
+     */
+    case class ConstantBackoff(@JsonProperty("backoff_time_in_seconds") backoffTimeInSeconds: Double)
+        extends BackoffStrategy
+
+    /**
+     * Extract wait time from response header.
+     *
+     * @param header
+     *   Header name containing wait time in seconds
+     * @param regex
+     *   Optional regex to extract numeric value from header
+     */
+    case class WaitTimeFromHeader(header: String, regex: Option[String] = None) extends BackoffStrategy
+
+    /**
+     * Extract wait until timestamp from response header.
+     *
+     * @param header
+     *   Header name containing timestamp
+     * @param regex
+     *   Optional regex to extract timestamp from header
+     * @param minWait
+     *   Minimum wait time in seconds
+     */
+    case class WaitUntilTimeFromHeader(
+      header: String,
+      regex: Option[String] = None,
+      @JsonProperty("min_wait") minWait: Option[Double] = None
+    ) extends BackoffStrategy
+
+  /**
+   * Error handler configuration.
+   *
+   * Sealed trait for compile-time exhaustiveness checking.
+   */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[ErrorHandler.DefaultErrorHandler], name = "DefaultErrorHandler"),
+      new JsonSubTypes.Type(value = classOf[ErrorHandler.CompositeErrorHandler], name = "CompositeErrorHandler")
+    )
+  )
+  sealed trait ErrorHandler
+
+  object ErrorHandler:
+
+    /**
+     * Default error handler with configurable retries and backoff.
+     *
+     * @param maxRetries
+     *   Maximum number of retry attempts (default 5)
+     * @param backoffStrategies
+     *   List of backoff strategies to try in order (fallback pattern)
+     * @param responseFilters
+     *   List of filters to determine response handling
+     */
+    case class DefaultErrorHandler(
+      @JsonProperty("max_retries") maxRetries: Int = 5,
+      @JsonProperty("backoff_strategies") backoffStrategies: List[BackoffStrategy] = List.empty,
+      @JsonProperty("response_filters") responseFilters: List[HttpResponseFilter] = List.empty
+    ) extends ErrorHandler
+
+    /**
+     * Composite error handler for different error types.
+     *
+     * Sequentially iterates through handlers, enabling different retry mechanisms for different errors.
+     *
+     * @param errorHandlers
+     *   List of error handlers to try in order
+     */
+    case class CompositeErrorHandler(@JsonProperty("error_handlers") errorHandlers: List[DefaultErrorHandler])
+        extends ErrorHandler
+
+  /**
    * HTTP request specification.
    *
    * @param url
@@ -83,6 +229,8 @@ package object spec:
    *   Authentication configuration
    * @param body
    *   Request body for POST/PUT requests (supports Jinja templates for JSON)
+   * @param errorHandler
+   *   Optional error handler configuration (default: retry 5xx and 429 with exponential backoff)
    */
   case class Requester(
     url: String,
@@ -90,7 +238,8 @@ package object spec:
     headers: Map[String, String] = Map.empty,
     params: Map[String, String] = Map.empty,
     auth: Auth = Auth.NoAuth,
-    body: Option[String] = None
+    body: Option[String] = None,
+    @JsonProperty("error_handler") errorHandler: Option[ErrorHandler] = None
   )
 
   /**
@@ -98,6 +247,15 @@ package object spec:
    *
    * Sealed trait for compile-time exhaustiveness checking.
    */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[PaginationStrategy.NoPagination.type], name = "NoPagination"),
+      new JsonSubTypes.Type(value = classOf[PaginationStrategy.PageIncrement], name = "PageIncrement"),
+      new JsonSubTypes.Type(value = classOf[PaginationStrategy.OffsetIncrement], name = "OffsetIncrement"),
+      new JsonSubTypes.Type(value = classOf[PaginationStrategy.CursorPagination], name = "CursorPagination")
+    )
+  )
   sealed trait PaginationStrategy
 
   object PaginationStrategy:
@@ -146,18 +304,24 @@ package object spec:
    *
    * Extracts records from JSON responses using JSONPath-style selectors.
    */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[Extractor.DPath], name = "DpathExtractor")
+    )
+  )
   sealed trait Extractor
 
   object Extractor:
     /**
-     * JSONPath-based extractor.
+     * JSONPath-based extractor (Airbyte compatible).
      *
      * Example: ["data", "users", "*"] extracts all users from {"data": {"users": [...]}}
      *
-     * @param fieldPath
+     * @param field_path
      *   Path segments. Use "*" for array wildcard.
      */
-    case class DPath(fieldPath: List[String]) extends Extractor
+    case class DPath(@JsonProperty("field_path") field_path: List[String]) extends Extractor
 
   /**
    * Record selector: extraction + optional filtering.
@@ -185,12 +349,23 @@ package object spec:
    *   How to extract records from responses
    * @param paginator
    *   Pagination strategy (optional, defaults to NoPagination)
+   * @param cursorField
+   *   Optional field name for incremental sync (e.g., "updated_at", "id").
+   *   When set, EXLO will:
+   *   1. Extract this field's value from each record
+   *   2. Track the maximum value seen
+   *   3. Save it in state as { "cursor": <max_value> }
+   *   4. Make it available in templates as {{ state.cursor }}
+   *
+   *   Example: cursorField = "updated_at" for timestamp-based incremental sync
+   *   Then URL can be: "/api/users?since={{ state.cursor | default('2020-01-01') }}"
    */
   case class StreamSpec(
     name: String,
     requester: Requester,
     recordSelector: RecordSelector,
-    paginator: PaginationStrategy = PaginationStrategy.NoPagination
+    paginator: PaginationStrategy = PaginationStrategy.NoPagination,
+    cursorField: Option[String] = None
   )
 
   /**
@@ -204,66 +379,3 @@ package object spec:
   case class ConnectorSpec(
     streams: List[StreamSpec]
   )
-
-  // Circe codecs for automatic JSON/YAML deserialization
-  import io.circe.{Decoder, Encoder}
-  import io.circe.generic.semiauto.*
-
-  given Decoder[HttpMethod] = Decoder[String].emap {
-    case "GET"  => Right(HttpMethod.GET)
-    case "POST" => Right(HttpMethod.POST)
-    case other  => Left(s"Unknown HTTP method: $other")
-  }
-
-  given Encoder[HttpMethod] = Encoder[String].contramap(_.toString)
-
-  given Decoder[Auth] = Decoder.instance { cursor =>
-    cursor.downField("type").as[String].flatMap {
-      case "NoAuth" => Right(Auth.NoAuth)
-      case "ApiKey" =>
-        for
-          header <- cursor.downField("header").as[String]
-          token  <- cursor.downField("token").as[String]
-        yield Auth.ApiKey(header, token)
-      case "Bearer" =>
-        cursor.downField("token").as[String].map(Auth.Bearer.apply)
-      case "OAuth"  =>
-        for
-          tokenUrl     <- cursor.downField("tokenUrl").as[String]
-          clientId     <- cursor.downField("clientId").as[String]
-          clientSecret <- cursor.downField("clientSecret").as[String]
-          scopes       <- cursor.downField("scopes").as[Option[String]]
-        yield Auth.OAuth(tokenUrl, clientId, clientSecret, scopes)
-      case other    => Left(io.circe.DecodingFailure(s"Unknown auth type: $other", cursor.history))
-    }
-  }
-
-  // Custom decoder for Extractor that unwraps DPath fields directly
-  given Decoder[Extractor] = Decoder.instance { cursor =>
-    cursor.downField("fieldPath").as[List[String]].map(Extractor.DPath.apply)
-  }
-
-  // Custom decoder for PaginationStrategy that uses "type" field for discrimination
-  given Decoder[PaginationStrategy] = Decoder.instance { cursor =>
-    cursor.downField("type").as[String].flatMap {
-      case "NoPagination"     => Right(PaginationStrategy.NoPagination)
-      case "PageIncrement"    =>
-        for
-          pageSize  <- cursor.downField("pageSize").as[Int]
-          startFrom <- cursor.downField("startFrom").as[Option[Int]]
-        yield PaginationStrategy.PageIncrement(pageSize, startFrom.getOrElse(0))
-      case "OffsetIncrement"  =>
-        cursor.downField("pageSize").as[Int].map(PaginationStrategy.OffsetIncrement.apply)
-      case "CursorPagination" =>
-        for
-          cursorValue   <- cursor.downField("cursorValue").as[String]
-          stopCondition <- cursor.downField("stopCondition").as[String]
-        yield PaginationStrategy.CursorPagination(cursorValue, stopCondition)
-      case other              => Left(io.circe.DecodingFailure(s"Unknown pagination type: $other", cursor.history))
-    }
-  }
-
-  given Decoder[Requester] = deriveDecoder[Requester]
-  given Decoder[RecordSelector] = deriveDecoder[RecordSelector]
-  given Decoder[StreamSpec] = deriveDecoder[StreamSpec]
-  given Decoder[ConnectorSpec] = deriveDecoder[ConnectorSpec]

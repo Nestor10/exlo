@@ -1,6 +1,7 @@
 package exlo.yaml.service
 
 import exlo.yaml.spec.Auth
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.http.*
 import zio.test.*

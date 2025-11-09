@@ -1,18 +1,28 @@
 package exlo.yaml.integration
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import exlo.yaml.infra.HttpClient
 import exlo.yaml.interpreter.YamlInterpreter
 import exlo.yaml.service.*
 import exlo.yaml.spec.*
-import io.circe.Json
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.http.*
 import zio.test.*
 
-/** Integration tests for POST requests with body templates.
-  *
-  * Uses JSONPlaceholder POST endpoints for testing.
-  */
+/**
+ * Integration tests for POST requests with body templates.
+ *
+ * Uses JSONPlaceholder POST endpoints for testing.
+ */
 object PostRequestSpec extends ZIOSpecDefault:
+
+  private val jsonMapper: ObjectMapper =
+    val mapper = new ObjectMapper()
+    mapper.registerModule(DefaultScalaModule)
+    mapper
 
   def spec = suite("POST Request Support")(
     test("sends POST request with JSON body") {
@@ -37,23 +47,21 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map.empty[String, Any]
+      val context = Map.empty[String, TemplateValue]
 
-      for
-        records <- YamlInterpreter
+      for records <- YamlInterpreter
           .interpretStream(spec, context)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
       yield assertTrue(
         records.nonEmpty,
-        records.head.hcursor.downField("id").as[Int].isRight,
-        records.head.hcursor.downField("title").as[String].contains("Test Post"),
-        records.head.hcursor.downField("body").as[String].contains("This is a test post"),
-        records.head.hcursor.downField("userId").as[Int].contains(1)
+        records.head.has("id"),
+        records.head.get("title").asText().contains("Test Post"),
+        records.head.get("body").asText().contains("This is a test post"),
+        records.head.get("userId").asInt() == 1
       )
     },
-
     test("renders body template with variables") {
       val spec = StreamSpec(
         name = "create-post-templated",
@@ -76,26 +84,24 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map(
-        "post_title" -> "Templated Title",
-        "post_body" -> "Templated body content",
-        "user_id" -> 42
+      val context = Map[String, TemplateValue](
+        "post_title" -> TemplateValue.Str("Templated Title"),
+        "post_body"  -> TemplateValue.Str("Templated body content"),
+        "user_id"    -> TemplateValue.Num(42)
       )
 
-      for
-        records <- YamlInterpreter
+      for records <- YamlInterpreter
           .interpretStream(spec, context)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
       yield assertTrue(
         records.nonEmpty,
-        records.head.hcursor.downField("title").as[String].contains("Templated Title"),
-        records.head.hcursor.downField("body").as[String].contains("Templated body content"),
-        records.head.hcursor.downField("userId").as[Int].contains(42)
+        records.head.get("title").asText().contains("Templated Title"),
+        records.head.get("body").asText().contains("Templated body content"),
+        records.head.get("userId").asInt() == 42
       )
     },
-
     test("sends POST with nested JSON structure") {
       val spec = StreamSpec(
         name = "create-nested",
@@ -122,23 +128,21 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map(
-        "source" -> "integration-test",
-        "timestamp" -> "2025-11-06T22:00:00Z"
+      val context = Map[String, TemplateValue](
+        "source"    -> TemplateValue.Str("integration-test"),
+        "timestamp" -> TemplateValue.Str("2025-11-06T22:00:00Z")
       )
 
-      for
-        records <- YamlInterpreter
+      for records <- YamlInterpreter
           .interpretStream(spec, context)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
       yield assertTrue(
         records.nonEmpty,
-        records.head.hcursor.downField("title").as[String].contains("Nested Structure")
+        records.head.get("title").asText().contains("Nested Structure")
       )
     },
-
     test("GET request still works without body") {
       val spec = StreamSpec(
         name = "get-users",
@@ -157,18 +161,17 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map.empty[String, Any]
+      val context = Map.empty[String, TemplateValue]
 
-      for
-        records <- YamlInterpreter
+      for records <- YamlInterpreter
           .interpretStream(spec, context)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
       yield assertTrue(
         records.nonEmpty,
-        records.head.hcursor.downField("id").as[Int].contains(1),
-        records.head.hcursor.downField("name").as[String].isRight
+        records.head.get("id").asInt() == 1,
+        records.head.has("name")
       )
     }
   ).provide(
@@ -176,5 +179,7 @@ object PostRequestSpec extends ZIOSpecDefault:
     HttpClient.Live.layer,
     TemplateEngine.Live.layer,
     ResponseParser.Live.layer,
-    Authenticator.Live.layer
+    Authenticator.Live.layer,
+    ErrorHandlerService.live,
+    RequestExecutor.live
   ) @@ TestAspect.timeout(60.seconds)

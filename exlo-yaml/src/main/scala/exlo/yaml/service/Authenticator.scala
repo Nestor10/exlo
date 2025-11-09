@@ -1,8 +1,10 @@
 package exlo.yaml.service
 
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.Auth
-import io.circe.parser.*
 import zio.*
 import zio.http.*
 
@@ -55,6 +57,11 @@ object Authenticator:
     client: Client,
     tokenCache: Ref[Map[String, TokenCacheEntry]]
   ) extends Authenticator:
+
+    private val jsonMapper: ObjectMapper =
+      val mapper = new ObjectMapper()
+      mapper.registerModule(DefaultScalaModule)
+      mapper
 
     override def authenticate(
       auth: Auth,
@@ -168,8 +175,8 @@ object Authenticator:
 
           // Parse response
           bodyText    <- response.body.asString
-          json        <- ZIO
-            .fromEither(parse(bodyText))
+          jsonNode    <- ZIO
+            .attempt(jsonMapper.readTree(bodyText))
             .mapError(e =>
               YamlRuntimeError.ParseError(
                 oauth.tokenUrl,
@@ -179,9 +186,12 @@ object Authenticator:
 
           // Extract access token and expiration
           accessToken <- ZIO
-            .fromEither(
-              json.hcursor.downField("access_token").as[String]
-            )
+            .attempt {
+              val tokenNode = jsonNode.get("access_token")
+              if (tokenNode == null || tokenNode.isNull)
+                throw new Exception("Missing access_token field")
+              tokenNode.asText()
+            }
             .mapError(e =>
               YamlRuntimeError.ParseError(
                 oauth.tokenUrl,
@@ -190,9 +200,11 @@ object Authenticator:
             )
 
           expiresIn <- ZIO
-            .fromEither(
-              json.hcursor.downField("expires_in").as[Int]
-            )
+            .attempt {
+              val expiresNode = jsonNode.get("expires_in")
+              if (expiresNode == null || expiresNode.isNull) 3600
+              else expiresNode.asInt()
+            }
             .orElse(ZIO.succeed(3600)) // Default to 1 hour
 
           // Cache token (subtract 60 seconds for safety margin)

@@ -1,6 +1,7 @@
 package exlo.yaml.service
 
 import exlo.yaml.spec.*
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.test.*
 
@@ -29,7 +30,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -74,7 +76,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        token: "secret-key"
         |    recordSelector:
         |      extractor:
-        |        fieldPath: ["data", "orders"]
+|        type: DpathExtractor
+        |        field_path: ["data", "orders"]
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -110,7 +113,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        token: "bearer-token-123"
         |    recordSelector:
         |      extractor:
-        |        fieldPath: ["items"]
+|        type: DpathExtractor
+        |        field_path: ["items"]
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -146,7 +150,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        scopes: "read write"
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -184,7 +189,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: PageIncrement
@@ -219,7 +225,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: ["data"]
+|        type: DpathExtractor
+        |        field_path: ["data"]
         |      filter: null
         |    paginator:
         |      type: OffsetIncrement
@@ -252,7 +259,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: ["data", "events"]
+|        type: DpathExtractor
+        |        field_path: ["data", "events"]
         |      filter: null
         |    paginator:
         |      type: CursorPagination
@@ -290,7 +298,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: "{{ record.status == 'active' }}"
         |    paginator:
         |      type: NoPagination
@@ -322,7 +331,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -336,7 +346,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -376,7 +387,8 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         |        }
         |    recordSelector:
         |      extractor:
-        |        fieldPath: []
+|        type: DpathExtractor
+        |        field_path: []
         |      filter: null
         |    paginator:
         |      type: NoPagination
@@ -404,6 +416,209 @@ object YamlSpecLoaderSpec extends ZIOSpecDefault:
         spec.streams.nonEmpty,
         spec.streams.head.name == "users",
         spec.streams.head.requester.url == "https://jsonplaceholder.typicode.com/users"
+      )
+    },
+    test("parses error_handler with DefaultErrorHandler") {
+      val yaml = """
+        |streams:
+        |  - name: test
+        |    requester:
+        |      url: "https://api.example.com/data"
+        |      method: GET
+        |      headers: {}
+        |      params: {}
+        |      auth:
+        |        type: NoAuth
+        |      error_handler:
+        |        type: DefaultErrorHandler
+        |        max_retries: 3
+        |        backoff_strategies:
+        |          - type: ExponentialBackoffStrategy
+        |            factor: 2
+        |        response_filters:
+        |          - http_codes: [429, 500, 502, 503]
+        |            action: RETRY
+        |    recordSelector:
+        |      extractor:
+        |        type: DpathExtractor
+        |        field_path: []
+        |    paginator:
+        |      type: NoPagination
+        |""".stripMargin
+
+      for
+        tempFile <- ZIO.succeed {
+          val path = Files.createTempFile("test-error-handler", ".yaml")
+          Files.write(path, yaml.getBytes)
+          path.toString
+        }
+
+        spec <- YamlSpecLoader.loadSpec(tempFile)
+        _    <- ZIO.succeed(Files.delete(Paths.get(tempFile)))
+
+        errorHandler = spec.streams.head.requester.errorHandler
+      yield assertTrue(
+        errorHandler.isDefined,
+        errorHandler.get.isInstanceOf[ErrorHandler.DefaultErrorHandler],
+        errorHandler.get.asInstanceOf[ErrorHandler.DefaultErrorHandler].maxRetries == 3,
+        errorHandler.get.asInstanceOf[ErrorHandler.DefaultErrorHandler].backoffStrategies.length == 1,
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .backoffStrategies
+          .head
+          .isInstanceOf[BackoffStrategy.ExponentialBackoff],
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .backoffStrategies
+          .head
+          .asInstanceOf[BackoffStrategy.ExponentialBackoff]
+          .factor == 2,
+        errorHandler.get.asInstanceOf[ErrorHandler.DefaultErrorHandler].responseFilters.length == 1,
+        errorHandler.get.asInstanceOf[ErrorHandler.DefaultErrorHandler].responseFilters.head.httpCodes == List(
+          429,
+          500,
+          502,
+          503
+        ),
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .responseFilters
+          .head
+          .action == ResponseAction.RETRY
+      )
+    },
+    test("parses error_handler with CompositeErrorHandler") {
+      val yaml = """
+        |streams:
+        |  - name: test
+        |    requester:
+        |      url: "https://api.example.com/data"
+        |      method: GET
+        |      headers: {}
+        |      params: {}
+        |      auth:
+        |        type: NoAuth
+        |      error_handler:
+        |        type: CompositeErrorHandler
+        |        error_handlers:
+        |          - type: DefaultErrorHandler
+        |            max_retries: 5
+        |            backoff_strategies:
+        |              - type: ConstantBackoffStrategy
+        |                backoff_time_in_seconds: 10
+        |            response_filters:
+        |              - http_codes: [403]
+        |                action: IGNORE
+        |          - type: DefaultErrorHandler
+        |            max_retries: 3
+        |            backoff_strategies:
+        |              - type: ExponentialBackoffStrategy
+        |                factor: 5
+        |            response_filters:
+        |              - http_codes: [429, 500]
+        |                action: RETRY
+        |    recordSelector:
+        |      extractor:
+        |        type: DpathExtractor
+        |        field_path: []
+        |    paginator:
+        |      type: NoPagination
+        |""".stripMargin
+
+      for
+        tempFile <- ZIO.succeed {
+          val path = Files.createTempFile("test-composite-error-handler", ".yaml")
+          Files.write(path, yaml.getBytes)
+          path.toString
+        }
+
+        spec <- YamlSpecLoader.loadSpec(tempFile)
+        _    <- ZIO.succeed(Files.delete(Paths.get(tempFile)))
+
+        errorHandler = spec.streams.head.requester.errorHandler
+      yield assertTrue(
+        errorHandler.isDefined,
+        errorHandler.get.isInstanceOf[ErrorHandler.CompositeErrorHandler],
+        errorHandler.get.asInstanceOf[ErrorHandler.CompositeErrorHandler].errorHandlers.length == 2,
+        errorHandler.get.asInstanceOf[ErrorHandler.CompositeErrorHandler].errorHandlers.head.maxRetries == 5,
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.CompositeErrorHandler]
+          .errorHandlers
+          .head
+          .backoffStrategies
+          .head
+          .isInstanceOf[BackoffStrategy.ConstantBackoff],
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.CompositeErrorHandler]
+          .errorHandlers
+          .head
+          .backoffStrategies
+          .head
+          .asInstanceOf[BackoffStrategy.ConstantBackoff]
+          .backoffTimeInSeconds == 10.0
+      )
+    },
+    test("parses error_handler with error_message_contains filter") {
+      val yaml = """
+        |streams:
+        |  - name: test
+        |    requester:
+        |      url: "https://api.example.com/data"
+        |      method: GET
+        |      headers: {}
+        |      params: {}
+        |      auth:
+        |        type: NoAuth
+        |      error_handler:
+        |        type: DefaultErrorHandler
+        |        max_retries: 5
+        |        response_filters:
+        |          - error_message_contains: "rate limit"
+        |            action: RETRY
+        |          - error_message_contains: "permission denied"
+        |            action: IGNORE
+        |    recordSelector:
+        |      extractor:
+        |        type: DpathExtractor
+        |        field_path: []
+        |    paginator:
+        |      type: NoPagination
+        |""".stripMargin
+
+      for
+        tempFile <- ZIO.succeed {
+          val path = Files.createTempFile("test-error-message-filter", ".yaml")
+          Files.write(path, yaml.getBytes)
+          path.toString
+        }
+
+        spec <- YamlSpecLoader.loadSpec(tempFile)
+        _    <- ZIO.succeed(Files.delete(Paths.get(tempFile)))
+
+        errorHandler = spec.streams.head.requester.errorHandler
+      yield assertTrue(
+        errorHandler.isDefined,
+        errorHandler.get.asInstanceOf[ErrorHandler.DefaultErrorHandler].responseFilters.length == 2,
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .responseFilters
+          .head
+          .errorMessageContains
+          .contains("rate limit"),
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .responseFilters
+          .head
+          .action == ResponseAction.RETRY,
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .responseFilters(1)
+          .errorMessageContains
+          .contains("permission denied"),
+        errorHandler.get
+          .asInstanceOf[ErrorHandler.DefaultErrorHandler]
+          .responseFilters(1)
+          .action == ResponseAction.IGNORE
       )
     }
   ).provide(YamlSpecLoader.Live.layer)
