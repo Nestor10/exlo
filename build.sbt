@@ -80,15 +80,15 @@ lazy val exloYaml = project
     version      := "0.1.0-SNAPSHOT",
     scalaVersion := scala3Version,
     libraryDependencies ++= Seq(
-      // Circe ecosystem for JSON/YAML
-      "io.circe" %% "circe-core"    % "0.14.10",
-      "io.circe" %% "circe-generic" % "0.14.10",
-      "io.circe" %% "circe-parser"  % "0.14.10",
-      "io.circe" %% "circe-yaml"    % "0.16.0",
-      "io.circe" %% "circe-optics"  % "0.15.0",
+      // Jackson 2.20.x (aligned with Iceberg/Nessie dependencies)
+      "com.fasterxml.jackson.core"       % "jackson-databind"        % "2.20.0",
+      "com.fasterxml.jackson.core"       % "jackson-core"            % "2.20.0",
+      "com.fasterxml.jackson.core"       % "jackson-annotations"     % "2.20",
+      "com.fasterxml.jackson.dataformat" % "jackson-dataformat-yaml" % "2.20.0",
+      "com.fasterxml.jackson.module"    %% "jackson-module-scala"    % "2.20.1",
 
-      // Monocle (optics library)
-      "dev.optics" %% "monocle-core" % "3.2.0",
+      // JSONPath support (full spec: filters, wildcards, recursive descent)
+      "com.jayway.jsonpath" % "json-path" % "2.9.0",
 
       // ZIO HTTP
       "dev.zio" %% "zio-http" % "3.0.1",
