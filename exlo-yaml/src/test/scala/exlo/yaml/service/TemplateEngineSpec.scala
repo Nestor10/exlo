@@ -1,7 +1,6 @@
 package exlo.yaml.service
 
 import exlo.yaml.template.TemplateValue
-import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.test.*
 
@@ -15,90 +14,82 @@ object TemplateEngineSpec extends ZIOSpecDefault:
   def spec = suite("TemplateEngine")(
     suite("render")(
       test("renders simple variable") {
-        for result <- TemplateEngine.render(
-            "Hello {{ name }}!",
-            Map("name" -> TemplateValue.Str("World"))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("name", TemplateValue.Str("World"))
+          result <- TemplateEngine.render("Hello {{ name }}!")
         yield assertTrue(result == "Hello World!")
       },
       test("renders multiple variables") {
-        for result <- TemplateEngine.render(
-            "{{ greeting }} {{ name }}!",
-            Map("greeting" -> TemplateValue.Str("Hi"), "name" -> TemplateValue.Str("Alice"))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("greeting", TemplateValue.Str("Hi"))
+          _      <- RuntimeContext.setPaginationVar("name", TemplateValue.Str("Alice"))
+          result <- TemplateEngine.render("{{ greeting }} {{ name }}!")
         yield assertTrue(result == "Hi Alice!")
       },
       test("renders nested object access") {
-        for result <- TemplateEngine.render(
-            "{{ config.api_key }}",
-            Map("config" -> TemplateValue.Obj(Map("api_key" -> Some(TemplateValue.Str("secret")))))
+        for
+          _      <- RuntimeContext.setPaginationVar(
+            "config",
+            TemplateValue.Obj(Map("api_key" -> Some(TemplateValue.Str("secret"))))
           )
+          result <- TemplateEngine.render("{{ config.api_key }}")
         yield assertTrue(result == "secret")
       },
       test("renders URL with variables") {
-        for result <- TemplateEngine.render(
-            "https://{{ shop }}.myshopify.com/api?limit={{ limit }}",
-            Map("shop" -> TemplateValue.Str("test-store"), "limit" -> TemplateValue.Num(50))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("shop", TemplateValue.Str("test-store"))
+          _      <- RuntimeContext.setPaginationVar("limit", TemplateValue.Num(50))
+          result <- TemplateEngine.render("https://{{ shop }}.myshopify.com/api?limit={{ limit }}")
         yield assertTrue(result == "https://test-store.myshopify.com/api?limit=50")
       },
       test("renders template with missing variable as empty") {
-        for result <- TemplateEngine.render(
-            "Value: {{ missing }}",
-            Map.empty
-          )
+        for result <- TemplateEngine.render("Value: {{ missing }}")
         yield assertTrue(result == "Value: ")
       }
     ),
     suite("evaluateCondition")(
       test("evaluates true condition") {
-        for result <- TemplateEngine.evaluateCondition(
-            "value > 10",
-            Map[String, TemplateValue]("value" -> TemplateValue.Num(15))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("value", TemplateValue.Num(15))
+          result <- TemplateEngine.evaluateCondition("value > 10")
         yield assertTrue(result == true)
       },
       test("evaluates false condition") {
-        for result <- TemplateEngine.evaluateCondition(
-            "value < 10",
-            Map[String, TemplateValue]("value" -> TemplateValue.Num(15))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("value", TemplateValue.Num(15))
+          result <- TemplateEngine.evaluateCondition("value < 10")
         yield assertTrue(result == false)
       },
       test("evaluates equality") {
-        for result <- TemplateEngine.evaluateCondition(
-            "status == 'active'",
-            Map("status" -> TemplateValue.Str("active"))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("status", TemplateValue.Str("active"))
+          result <- TemplateEngine.evaluateCondition("status == 'active'")
         yield assertTrue(result == true)
       },
       test("evaluates boolean variable") {
-        for result <- TemplateEngine.evaluateCondition(
-            "is_valid",
-            Map("is_valid" -> TemplateValue.Bool(true))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("is_valid", TemplateValue.Bool(true))
+          result <- TemplateEngine.evaluateCondition("is_valid")
         yield assertTrue(result == true)
       },
       test("evaluates logical AND") {
-        for result <- TemplateEngine.evaluateCondition(
-            "x > 5 and y < 10",
-            Map("x" -> TemplateValue.Num(7), "y" -> TemplateValue.Num(8))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("x", TemplateValue.Num(7))
+          _      <- RuntimeContext.setPaginationVar("y", TemplateValue.Num(8))
+          result <- TemplateEngine.evaluateCondition("x > 5 and y < 10")
         yield assertTrue(result == true)
       },
       test("treats non-empty string as truthy") {
-        for result <- TemplateEngine.evaluateCondition(
-            "name",
-            Map("name" -> TemplateValue.Str("Alice"))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("name", TemplateValue.Str("Alice"))
+          result <- TemplateEngine.evaluateCondition("name")
         yield assertTrue(result == true)
       },
       test("treats empty string as falsy") {
-        for result <- TemplateEngine.evaluateCondition(
-            "name",
-            Map("name" -> TemplateValue.Str(""))
-          )
+        for
+          _      <- RuntimeContext.setPaginationVar("name", TemplateValue.Str(""))
+          result <- TemplateEngine.evaluateCondition("name")
         yield assertTrue(result == false)
       }
     )
-  ).provide(TemplateEngine.Live.layer)
+  ).provide(TemplateEngine.Live.layer, RuntimeContext.Stub.layer)

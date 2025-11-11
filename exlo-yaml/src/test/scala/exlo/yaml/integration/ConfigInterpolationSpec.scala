@@ -56,28 +56,25 @@ object ConfigInterpolationSpec extends ZIOSpecDefault:
         _ <- ZIO.succeed(assertTrue(spec.streams.size == 1))
 
         // Load config from environment
-        config <- ConfigLoader.loadUnvalidated
-        context = Map(
-          "state"  -> TemplateValue.Obj(Map.empty),
-          "config" -> TemplateValue.fromJsonNode(config.node)
-        )
+        config <- ConfigLoader.load
+        // Set config in RuntimeContext
+        _      <- RuntimeContext.setPaginationVar("state", TemplateValue.Obj(Map.empty))
+        _      <- RuntimeContext.setPaginationVar("config", TemplateValue.fromJsonNode(config.node))
 
         // Render URL template
         templateEngine <- ZIO.service[TemplateEngine]
-        renderedUrl <- templateEngine.render(
-          spec.streams.head.requester.url,
-          context
-        )
+        renderedUrl    <- templateEngine.render(spec.streams.head.requester.url)
 
         // Render header template
         accessToken = spec.streams.head.requester.headers("X-Shopify-Access-Token")
-        renderedToken <- templateEngine.render(accessToken, context)
+        renderedToken <- templateEngine.render(accessToken)
       yield assertTrue(
         renderedUrl == "https://my-store.myshopify.com/admin/api/2024-01/products.json",
         renderedToken == "shpat_secret"
       )
     }.provide(
       TemplateEngine.Live.layer,
+      RuntimeContext.Stub.layer,
       YamlSpecLoader.Live.layer,
       Client.default
     ),
@@ -117,11 +114,11 @@ object ConfigInterpolationSpec extends ZIOSpecDefault:
         _        <- ZIO.succeed(java.nio.file.Files.delete(java.nio.file.Paths.get(tempFile)))
 
         // Load config from environment
-        config <- ConfigLoader.loadUnvalidated
-        context    = Map(
-          "state"  -> TemplateValue.Obj(Map.empty),
-          "config" -> TemplateValue.fromJsonNode(config.node)
-        )
+        config <- ConfigLoader.load
+
+        // Set config in RuntimeContext
+        _ <- RuntimeContext.setPaginationVar("state", TemplateValue.Obj(Map.empty))
+        _ <- RuntimeContext.setPaginationVar("config", TemplateValue.fromJsonNode(config.node))
 
         // Render the token template manually to verify interpolation
         templateEngine <- ZIO.service[TemplateEngine]
@@ -129,7 +126,7 @@ object ConfigInterpolationSpec extends ZIOSpecDefault:
           case auth: Auth.ApiKey => auth
           case _                 => throw new Exception("Expected ApiKey auth")
 
-        renderedToken <- templateEngine.render(authConfig.token, context)
+        renderedToken <- templateEngine.render(authConfig.token)
       yield assertTrue(
         authConfig.header == "X-API-Key",
         renderedToken == "secret123"
@@ -137,6 +134,7 @@ object ConfigInterpolationSpec extends ZIOSpecDefault:
     }.provide(
       Authenticator.Live.layer,
       TemplateEngine.Live.layer,
+      RuntimeContext.Stub.layer,
       YamlSpecLoader.Live.layer,
       HttpClient.Live.layer,
       Client.default
@@ -184,21 +182,22 @@ object ConfigInterpolationSpec extends ZIOSpecDefault:
           case _                => throw new Exception("Expected OAuth auth")
 
         // Load config from environment
-        config <- ConfigLoader.loadUnvalidated
-        context    = Map(
-          "state"  -> TemplateValue.Obj(Map.empty),
-          "config" -> TemplateValue.fromJsonNode(config.node)
-        )
+        config <- ConfigLoader.load
+
+        // Set config in RuntimeContext
+        _ <- RuntimeContext.setPaginationVar("state", TemplateValue.Obj(Map.empty))
+        _ <- RuntimeContext.setPaginationVar("config", TemplateValue.fromJsonNode(config.node))
 
         templateEngine       <- ZIO.service[TemplateEngine]
-        renderedClientId     <- templateEngine.render(authConfig.clientId, context)
-        renderedClientSecret <- templateEngine.render(authConfig.clientSecret, context)
+        renderedClientId     <- templateEngine.render(authConfig.clientId)
+        renderedClientSecret <- templateEngine.render(authConfig.clientSecret)
       yield assertTrue(
         renderedClientId == "app123",
         renderedClientSecret == "secret456"
       )
     }.provide(
       TemplateEngine.Live.layer,
+      RuntimeContext.Stub.layer,
       YamlSpecLoader.Live.layer,
       Client.default
     )

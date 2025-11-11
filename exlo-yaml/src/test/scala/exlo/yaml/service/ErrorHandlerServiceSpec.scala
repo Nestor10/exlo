@@ -403,6 +403,194 @@ object ErrorHandlerServiceSpec extends ZIOSpecDefault:
           count == 1 // No retries with empty handlers
         )
       }
+    ),
+    suite("header-based backoff - WaitTimeFromHeader")(
+      test("extracts Retry-After header and uses delay") {
+        val handler = ErrorHandler.DefaultErrorHandler(
+          maxRetries = 3,
+          backoffStrategies = List(
+            BackoffStrategy.WaitTimeFromHeader("Retry-After", None)
+          ),
+          responseFilters = List(
+            HttpResponseFilter(ResponseAction.RETRY, httpCodes = List(429))
+          )
+        )
+
+        for
+          // Create RuntimeContext with Retry-After header set to 5 seconds
+          ctx <- ZIO.service[RuntimeContext]
+          _   <- ctx.updateHeaders(Map("Retry-After" -> "5"))
+
+          // Create ErrorHandlerService with RuntimeContext
+          service <- ZIO.service[ErrorHandlerService]
+          policy = service.buildRetryPolicy(handler)
+
+          attemptCount <- Ref.make(0)
+
+          // Effect that fails with 429
+          effect = attemptCount.updateAndGet(_ + 1).flatMap { count =>
+            if count < 2 then ZIO.fail(YamlRuntimeError.HttpError("GET /api", 429, "Rate limited"))
+            else ZIO.succeed("success")
+          }
+
+          // Fork and advance clock by the header-specified delay
+          fiber  <- effect.retry(policy).fork
+          _      <- TestClock.adjust(5.seconds) // Should match Retry-After header
+          result <- fiber.join
+          count  <- attemptCount.get
+        yield assertTrue(
+          result == "success",
+          count == 2 // Original attempt + 1 retry
+        )
+      }.provide(RuntimeContext.Stub.layer, ErrorHandlerService.liveWithContext),
+      test("falls back to default delay when header missing") {
+        val handler = ErrorHandler.DefaultErrorHandler(
+          maxRetries = 2,
+          backoffStrategies = List(
+            BackoffStrategy.WaitTimeFromHeader("Retry-After", None)
+          ),
+          responseFilters = List(
+            HttpResponseFilter(ResponseAction.RETRY, httpCodes = List(429))
+          )
+        )
+
+        for
+          // Create RuntimeContext with NO Retry-After header
+          ctx <- ZIO.service[RuntimeContext]
+
+          service <- ZIO.service[ErrorHandlerService]
+          policy = service.buildRetryPolicy(handler)
+
+          attemptCount <- Ref.make(0)
+
+          effect = attemptCount.updateAndGet(_ + 1).flatMap { count =>
+            if count < 2 then ZIO.fail(YamlRuntimeError.HttpError("GET /api", 429, "Rate limited"))
+            else ZIO.succeed("success")
+          }
+
+          fiber  <- effect.retry(policy).fork
+          _      <- TestClock.adjust(1.second) // Falls back to 1 second default
+          result <- fiber.join
+          count  <- attemptCount.get
+        yield assertTrue(
+          result == "success",
+          count == 2
+        )
+      }.provide(RuntimeContext.Stub.layer, ErrorHandlerService.liveWithContext),
+      test("extracts value with regex pattern") {
+        val handler = ErrorHandler.DefaultErrorHandler(
+          maxRetries = 2,
+          backoffStrategies = List(
+            // Extract number from "wait 120 seconds" format
+            BackoffStrategy.WaitTimeFromHeader("X-Custom-Header", Some("""(\d+)"""))
+          ),
+          responseFilters = List(
+            HttpResponseFilter(ResponseAction.RETRY, httpCodes = List(429))
+          )
+        )
+
+        for
+          ctx <- ZIO.service[RuntimeContext]
+          _   <- ctx.updateHeaders(Map("X-Custom-Header" -> "wait 3 seconds"))
+
+          service <- ZIO.service[ErrorHandlerService]
+          policy = service.buildRetryPolicy(handler)
+
+          attemptCount <- Ref.make(0)
+
+          effect = attemptCount.updateAndGet(_ + 1).flatMap { count =>
+            if count < 2 then ZIO.fail(YamlRuntimeError.HttpError("GET /api", 429, "Rate limited"))
+            else ZIO.succeed("success")
+          }
+
+          fiber  <- effect.retry(policy).fork
+          _      <- TestClock.adjust(3.seconds) // Should extract "3" from header
+          result <- fiber.join
+          count  <- attemptCount.get
+        yield assertTrue(
+          result == "success",
+          count == 2
+        )
+      }.provide(RuntimeContext.Stub.layer, ErrorHandlerService.liveWithContext)
+    ),
+    suite("header-based backoff - WaitUntilTimeFromHeader")(
+      test("extracts timestamp and calculates wait duration") {
+        val handler = ErrorHandler.DefaultErrorHandler(
+          maxRetries = 2,
+          backoffStrategies = List(
+            BackoffStrategy.WaitUntilTimeFromHeader("X-RateLimit-Reset", None, None)
+          ),
+          responseFilters = List(
+            HttpResponseFilter(ResponseAction.RETRY, httpCodes = List(429))
+          )
+        )
+
+        for
+          // Set timestamp to 3 seconds in the future
+          now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
+          futureTimestamp = (now + 3000) / 1000 // Convert to seconds
+
+          ctx <- ZIO.service[RuntimeContext]
+          _   <- ctx.updateHeaders(Map("X-RateLimit-Reset" -> futureTimestamp.toString))
+
+          service <- ZIO.service[ErrorHandlerService]
+          policy = service.buildRetryPolicy(handler)
+
+          attemptCount <- Ref.make(0)
+
+          effect = attemptCount.updateAndGet(_ + 1).flatMap { count =>
+            if count < 2 then ZIO.fail(YamlRuntimeError.HttpError("GET /api", 429, "Rate limited"))
+            else ZIO.succeed("success")
+          }
+
+          fiber  <- effect.retry(policy).fork
+          _      <- TestClock.adjust(3.seconds) // Should wait until timestamp
+          result <- fiber.join
+          count  <- attemptCount.get
+        yield assertTrue(
+          result == "success",
+          count == 2
+        )
+      }.provide(RuntimeContext.Stub.layer, ErrorHandlerService.liveWithContext),
+      test("respects minWait parameter") {
+        val handler = ErrorHandler.DefaultErrorHandler(
+          maxRetries = 2,
+          backoffStrategies = List(
+            // minWait = 5 seconds
+            BackoffStrategy.WaitUntilTimeFromHeader("X-RateLimit-Reset", None, Some(5.0))
+          ),
+          responseFilters = List(
+            HttpResponseFilter(ResponseAction.RETRY, httpCodes = List(429))
+          )
+        )
+
+        for
+          // Set timestamp to 1 second in the future (less than minWait)
+          now <- Clock.currentTime(java.util.concurrent.TimeUnit.MILLISECONDS)
+          futureTimestamp = (now + 1000) / 1000
+
+          ctx <- ZIO.service[RuntimeContext]
+          _   <- ctx.updateHeaders(Map("X-RateLimit-Reset" -> futureTimestamp.toString))
+
+          service <- ZIO.service[ErrorHandlerService]
+          policy = service.buildRetryPolicy(handler)
+
+          attemptCount <- Ref.make(0)
+
+          effect = attemptCount.updateAndGet(_ + 1).flatMap { count =>
+            if count < 2 then ZIO.fail(YamlRuntimeError.HttpError("GET /api", 429, "Rate limited"))
+            else ZIO.succeed("success")
+          }
+
+          fiber  <- effect.retry(policy).fork
+          _      <- TestClock.adjust(5.seconds) // Should use minWait, not calculated 1s
+          result <- fiber.join
+          count  <- attemptCount.get
+        yield assertTrue(
+          result == "success",
+          count == 2
+        )
+      }.provide(RuntimeContext.Stub.layer, ErrorHandlerService.liveWithContext)
     )
   ).provide(ErrorHandlerService.live)
 

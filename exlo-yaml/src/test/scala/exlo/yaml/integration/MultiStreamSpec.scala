@@ -103,7 +103,7 @@ object MultiStreamSpec extends ZIOSpecDefault:
             val context = Map.empty[String, TemplateValue]
 
             YamlInterpreter
-              .interpretStream(streamSpec, context)
+              .interpretStream(streamSpec)
               .map(json => StreamElement.Data(json.toString))
           }
           .take(5)
@@ -128,7 +128,9 @@ object MultiStreamSpec extends ZIOSpecDefault:
       ResponseParser.Live.layer,
       Authenticator.Live.layer,
       ErrorHandlerService.live,
-      RequestExecutor.live
+      RateLimiter.Live.layer,
+      RequestExecutor.live,
+      RuntimeContext.Stub.layer
     ),
     test("fails when stream name not found") {
       val yaml = """
@@ -249,7 +251,7 @@ object MultiStreamSpec extends ZIOSpecDefault:
             val context = Map.empty[String, TemplateValue]
 
             YamlInterpreter
-              .interpretStream(streamSpec, context)
+              .interpretStream(streamSpec)
               .map(json => StreamElement.Data(json.toString))
           }
           .take(5)
@@ -271,6 +273,8 @@ object MultiStreamSpec extends ZIOSpecDefault:
       ResponseParser.Live.layer,
       Authenticator.Live.layer,
       ErrorHandlerService.live,
-      RequestExecutor.live
+      RateLimiter.Live.layer,
+      RequestExecutor.live,
+      RuntimeContext.Stub.layer
     )
   ) @@ TestAspect.timeout(60.seconds)

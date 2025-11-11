@@ -32,9 +32,25 @@ import zio.stream.*
  */
 object YamlConnector extends ExloApp:
 
+  // Load spec once at initialization and cache it
+  // We need the spec for both version (at startup) and extract (at runtime)
+  private lazy val cachedSpec: ConnectorSpec = {
+    import zio.Unsafe.unsafe
+    implicit val u: Unsafe = unsafe(identity)
+
+    val specPath = sys.env.getOrElse("EXLO_CONNECTOR_SPEC_PATH", "connector.yaml")
+    val runtime  = Runtime.default
+
+    runtime.unsafe
+      .run(
+        YamlSpecLoader.loadSpecDirect(specPath)
+      )
+      .getOrThrowFiberFailure()
+  }
+
   override def connectorId: String = "yaml-connector"
 
-  override def connectorVersion: String = "0.1.0"
+  override def connectorVersion: String = cachedSpec.version
 
   /**
    * User environment includes all YAML runtime services.
@@ -45,26 +61,29 @@ object YamlConnector extends ExloApp:
    *   - TemplateEngine: Render Jinja2 templates
    *   - ResponseParser: Extract records from JSON
    *   - Authenticator: Apply auth to requests
-   *   - StateTracker: Track incremental sync state (cursor values)
-   *   - ErrorHandlerService: YAML-configurable retry policies
+   *   - RuntimeContext: Execution-scoped state (headers, cursor, pagination vars)
+   *   - ErrorHandlerService: YAML-configurable retry policies (reads from RuntimeContext)
    *   - RequestExecutor: Consolidated request execution with all cross-cutting concerns
    */
-  override type Env = YamlSpecLoader & RequestExecutor & TemplateEngine & ResponseParser & StateTracker
+  type Env = YamlSpecLoader & RequestExecutor & TemplateEngine & ResponseParser & ErrorHandlerService & RuntimeContext
 
   override def environment: ZLayer[Any, Any, Env] =
     ZLayer.make[Env](
       // Infrastructure layers
       Client.default, // zio-http Client (scoped)
 
+      // RuntimeContext layer - loads config from env, state initialized in extract()
+      RuntimeContext.Live.layer,
+
       // Service layers
       YamlSpecLoader.Live.layer,
-      HttpClient.Live.layer,    // depends on Client
+      HttpClient.Live.layerWithContext,    // depends on Client & RuntimeContext
       TemplateEngine.Live.layer,
       ResponseParser.Live.layer,
       Authenticator.Live.layer,
-      StateTracker.Live.layer,  // Stateful cursor tracking
-      ErrorHandlerService.live, // YAML-configurable error handling
-      RequestExecutor.live      // Consolidated request execution
+      ErrorHandlerService.liveWithContext, // YAML-configurable error handling with RuntimeContext
+      RateLimiter.Live.layer,              // Rate limiting to prevent 429 errors
+      RequestExecutor.live                 // Consolidated request execution
     )
 
   override def extract(state: String): ZStream[Env, Throwable, StreamElement] =
@@ -74,104 +93,59 @@ object YamlConnector extends ExloApp:
           // Load stream config to get which stream to execute
           streamConfig <- ZIO.config(StreamConfig.config)
 
-          // Load YAML spec from config
-          // TODO: Get path from config in Phase 2
-          specPath <- ZIO.succeed("connector.yaml") // Hardcoded for MVP
-
-          spec <- YamlSpecLoader.loadSpec(specPath)
-
-          // Validate at least one stream exists
-          _          <- ZIO.when(spec.streams.isEmpty)(
-            ZIO.fail(
-              new RuntimeException("No streams defined in YAML spec")
-            )
-          )
-
           // Select the stream to execute based on config (streamName is now required)
           streamSpec <- ZIO
-            .fromOption(spec.streams.find(_.name == streamConfig.streamName))
+            .fromOption(cachedSpec.streams.find(_.name == streamConfig.streamName))
             .orElseFail(
               new RuntimeException(
-                s"Stream '${streamConfig.streamName}' not found in YAML spec. Available streams: ${spec.streams.map(_.name).mkString(", ")}"
+                s"Stream '${streamConfig.streamName}' not found in YAML spec. Available streams: ${cachedSpec.streams.map(_.name).mkString(", ")}"
               )
             )
         yield streamSpec
       }
       .flatMap { streamSpec =>
-        // Initialize StateTracker with current state, then process stream
-        ZStream.fromZIO(StateTracker.reset(state)) *>
-          ZStream
-            .fromZIO(buildContext(state))
-            .flatMap { context =>
-              // Interpret stream spec into record stream
-              YamlInterpreter
-                .interpretStream(streamSpec, context)
-                .mapZIO { jsonNode =>
-                  // Update state tracker for each record (if cursor field configured)
-                  StateTracker
-                    .updateFromRecord(jsonNode, streamSpec.cursorField)
+        // Initialize RuntimeContext with cursor from state parameter (if present)
+        val initState = ZStream.fromZIO {
+          if state.isEmpty then ZIO.unit
+          else
+            ZIO
+              .attempt {
+                val mapper   = new com.fasterxml.jackson.databind.ObjectMapper()
+                val jsonNode = mapper.readTree(state)
+                Option(jsonNode.get("cursor")).map(_.asText())
+              }
+              .flatMap {
+                case Some(cursor) => RuntimeContext.updateCursor(cursor)
+                case None         => ZIO.unit
+              }
+        }
+
+        initState *>
+          // Interpret stream spec into record stream (context read from RuntimeContext)
+          YamlInterpreter
+            .interpretStream(streamSpec)
+            .mapZIO { jsonNode =>
+              // Update RuntimeContext cursor for each record (if cursor field configured)
+              streamSpec.cursorField match
+                case Some(fieldName) =>
+                  Option(jsonNode.get(fieldName))
+                    .map(_.asText())
+                    .map(RuntimeContext.updateCursor)
+                    .getOrElse(ZIO.unit)
                     .as(StreamElement.Data(jsonNode.toString))
-                }
+                case None            =>
+                  ZIO.succeed(StreamElement.Data(jsonNode.toString))
             }
-            .grouped(100) // Batch records for efficiency
+            .grouped(1000) // Batch records for efficiency
             .flatMap { chunk =>
               // Emit data records + checkpoint after each batch
               val dataRecords = ZStream.fromChunk(chunk)
 
-              // Get current state from StateTracker for checkpoint
+              // Get current state from RuntimeContext for checkpoint
               val checkpoint = ZStream.fromZIO(
-                StateTracker.getStateJson.map(stateJson => StreamElement.Checkpoint(stateJson))
+                RuntimeContext.getStateJson.map(stateJson => StreamElement.Checkpoint(stateJson))
               )
 
               dataRecords ++ checkpoint
             }
       }
-
-  /**
-   * Build template context from state and config.
-   *
-   * Context is available to Jinja2 templates in the YAML spec.
-   *
-   * Provides:
-   * - `state`: Parsed JSON state (empty object if fresh start)
-   * - `config`: Connector-specific config from EXLO_CONNECTOR_CONFIG env var
-   *
-   * Example templates:
-   * - `{{ config.api_key }}` - Access API key from config
-   * - `{{ config.shop }}.myshopify.com` - Build URL with config value
-   * - `{{ state.cursor }}` - Access cursor from state (incremental sync)
-   * - `{{ state.lastTimestamp }}` - Access timestamp from state
-   * - `{{ config.organization_ids }}` - Access array values (Snapchat example)
-   *
-   * State Format:
-   * State is JSON that tracks what's been extracted (for incremental sync):
-   * ```json
-   * {
-   *   "cursor": "next_page_token_value",
-   *   "lastTimestamp": "2024-01-15T10:30:00Z",
-   *   "lastProcessedId": 12345
-   * }
-   * ```
-   */
-  private def buildContext(state: String): Task[Map[String, TemplateValue]] =
-    import com.fasterxml.jackson.databind.ObjectMapper
-    import exlo.yaml.infra.ConfigLoader
-    import exlo.yaml.template.TemplateValue
-
-    for
-      connectorConfig <- ConfigLoader.loadUnvalidated
-
-      // Parse state JSON (empty object if no state)
-      stateValue  <- ZIO
-        .attempt {
-          if state.isEmpty then TemplateValue.Obj(Map.empty)
-          else
-            val mapper   = new ObjectMapper()
-            val jsonNode = mapper.readTree(state)
-            TemplateValue.fromJsonNode(jsonNode)
-        }
-        .mapError(e => new RuntimeException(s"Failed to parse state JSON: ${e.getMessage}", e))
-    yield Map[String, TemplateValue](
-      "state"  -> stateValue,
-      "config" -> TemplateValue.fromJsonNode(connectorConfig.node)
-    )

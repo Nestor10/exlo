@@ -50,7 +50,7 @@ object PostRequestSpec extends ZIOSpecDefault:
       val context = Map.empty[String, TemplateValue]
 
       for records <- YamlInterpreter
-          .interpretStream(spec, context)
+          .interpretStream(spec)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
@@ -84,14 +84,14 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map[String, TemplateValue](
-        "post_title" -> TemplateValue.Str("Templated Title"),
-        "post_body"  -> TemplateValue.Str("Templated body content"),
-        "user_id"    -> TemplateValue.Num(42)
-      )
+      for
+        // Set template variables in RuntimeContext
+        _ <- RuntimeContext.setPaginationVar("post_title", TemplateValue.Str("Templated Title"))
+        _ <- RuntimeContext.setPaginationVar("post_body", TemplateValue.Str("Templated body content"))
+        _ <- RuntimeContext.setPaginationVar("user_id", TemplateValue.Num(42))
 
-      for records <- YamlInterpreter
-          .interpretStream(spec, context)
+        records <- YamlInterpreter
+          .interpretStream(spec)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
@@ -128,13 +128,13 @@ object PostRequestSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      val context = Map[String, TemplateValue](
-        "source"    -> TemplateValue.Str("integration-test"),
-        "timestamp" -> TemplateValue.Str("2025-11-06T22:00:00Z")
-      )
+      for
+        // Set template variables in RuntimeContext
+        _ <- RuntimeContext.setPaginationVar("source", TemplateValue.Str("integration-test"))
+        _ <- RuntimeContext.setPaginationVar("timestamp", TemplateValue.Str("2025-11-06T22:00:00Z"))
 
-      for records <- YamlInterpreter
-          .interpretStream(spec, context)
+        records <- YamlInterpreter
+          .interpretStream(spec)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
@@ -164,7 +164,7 @@ object PostRequestSpec extends ZIOSpecDefault:
       val context = Map.empty[String, TemplateValue]
 
       for records <- YamlInterpreter
-          .interpretStream(spec, context)
+          .interpretStream(spec)
           .runCollect
           .timeout(30.seconds)
           .someOrFailException
@@ -181,5 +181,7 @@ object PostRequestSpec extends ZIOSpecDefault:
     ResponseParser.Live.layer,
     Authenticator.Live.layer,
     ErrorHandlerService.live,
-    RequestExecutor.live
+    RateLimiter.Live.layer,
+    RequestExecutor.live,
+    RuntimeContext.Stub.layer
   ) @@ TestAspect.timeout(60.seconds)

@@ -45,8 +45,11 @@ object YamlRuntimeError:
    *   HTTP status code
    * @param body
    *   Response body (may be truncated)
+   * @param headers
+   *   Response headers (for retry/backoff logic)
    */
-  case class HttpError(url: String, status: Int, body: String) extends YamlRuntimeError:
+  case class HttpError(url: String, status: Int, body: String, headers: Map[String, String] = Map.empty)
+      extends YamlRuntimeError:
     override def getMessage: String = s"HTTP $status from $url: ${body.take(200)}"
 
   /**

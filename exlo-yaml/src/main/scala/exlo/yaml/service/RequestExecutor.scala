@@ -21,14 +21,14 @@ trait RequestExecutor:
   /**
    * Execute an HTTP request with all processing steps.
    *
+   * Context (config, state, pagination vars) is read from RuntimeContext.
+   *
    * @param requester The request specification from YAML
-   * @param context Template context for rendering dynamic values
    * @return The response body as JsonNode
    */
   def execute(
-    requester: Requester,
-    context: Map[String, TemplateValue]
-  ): IO[Throwable, JsonNode]
+    requester: Requester
+  ): ZIO[RuntimeContext, Throwable, JsonNode]
 
 object RequestExecutor:
 
@@ -36,7 +36,8 @@ object RequestExecutor:
     httpClient: HttpClient,
     templateEngine: TemplateEngine,
     authenticator: Authenticator,
-    errorHandlerService: ErrorHandlerService
+    errorHandlerService: ErrorHandlerService,
+    rateLimiter: RateLimiter
   ) extends RequestExecutor:
 
     import exlo.yaml.spec.{ErrorHandler, BackoffStrategy, ResponseAction, HttpResponseFilter}
@@ -58,22 +59,26 @@ object RequestExecutor:
     )
 
     def execute(
-      requester: Requester,
-      context: Map[String, TemplateValue]
-    ): IO[Throwable, JsonNode] =
+      requester: Requester
+    ): ZIO[RuntimeContext, Throwable, JsonNode] =
       for
-        // Render templates
-        url             <- templateEngine.render(requester.url, context)
+        // Check rate limit before executing request
+        _               <- requester.callRatePolicy match
+          case Some(policy) => rateLimiter.checkLimit(policy)
+          case None         => ZIO.unit
+
+        // Render templates (reads context from RuntimeContext)
+        url             <- templateEngine.render(requester.url)
         renderedHeaders <- ZIO
           .foreach(requester.headers.toList) {
             case (key, value) =>
-              templateEngine.render(value, context).map(key -> _)
+              templateEngine.render(value).map(key -> _)
           }
           .map(_.toMap)
         renderedParams  <- ZIO
           .foreach(requester.params.toList) {
             case (key, value) =>
-              templateEngine.render(value, context).map(key -> _)
+              templateEngine.render(value).map(key -> _)
           }
           .map(_.toMap)
 
@@ -83,7 +88,7 @@ object RequestExecutor:
         // Render body if present
         renderedBody <- requester.body match
           case Some(bodyTemplate) =>
-            templateEngine.render(bodyTemplate, context).map(Some(_))
+            templateEngine.render(bodyTemplate).map(Some(_))
           case None               =>
             ZIO.succeed(None)
 
@@ -102,7 +107,10 @@ object RequestExecutor:
           )
           .retry(retryPolicy)
           .tapError(error => ZIO.logError(s"Request failed after retries: $error"))
+
+        // Record request timestamp after successful execution
+        _        <- RuntimeContext.recordRequest
       yield response
 
-  val live: URLayer[HttpClient & TemplateEngine & Authenticator & ErrorHandlerService, RequestExecutor] =
+  val live: URLayer[HttpClient & TemplateEngine & Authenticator & ErrorHandlerService & RateLimiter, RequestExecutor] =
     ZLayer.fromFunction(Live.apply)

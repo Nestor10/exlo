@@ -38,6 +38,14 @@ object YamlSpecLoader:
   def loadSpec(path: String): ZIO[YamlSpecLoader, Throwable, ConnectorSpec] =
     ZIO.serviceWithZIO[YamlSpecLoader](_.loadSpec(path))
 
+  /**
+   * Convenience helper that loads a spec without requiring the `YamlSpecLoader`
+   * service in the environment. This is useful for early (synchronous) init
+   * or for bootstrapping code that doesn't want to construct a ZLayer.
+   */
+  def loadSpecDirect(path: String): IO[Throwable, ConnectorSpec] =
+    Live().loadSpec(path)
+
   /** Live implementation using Jackson YAML parser. */
   case class Live() extends YamlSpecLoader:
 

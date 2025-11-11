@@ -3,6 +3,7 @@ package exlo.yaml.infra
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import exlo.yaml.domain.YamlRuntimeError
+import exlo.yaml.service.RuntimeContext
 import exlo.yaml.spec.HttpMethod
 import zio.*
 import zio.http.*
@@ -29,6 +30,9 @@ trait HttpClient:
    *   - YamlRuntimeError.HttpError for HTTP failures (4xx, 5xx)
    *   - YamlRuntimeError.ParseError for JSON parsing failures
    *   - Network errors (connection failures, timeouts)
+   *
+   * Side effect: Stores response headers in RuntimeContext (if available) for
+   * backoff strategies and rate limiting.
    *
    * Application layer should add retry logic as needed using .retry(schedule).
    *
@@ -72,7 +76,7 @@ object HttpClient:
     )
 
   /** Live implementation using zio-http Client. */
-  case class Live(client: Client) extends HttpClient:
+  case class Live(client: Client, runtimeContext: Option[RuntimeContext]) extends HttpClient:
 
     private val jsonMapper = new ObjectMapper()
 
@@ -99,7 +103,7 @@ object HttpClient:
             )
 
           // Build request
-          request = method match
+          request         = method match
             case HttpMethod.GET =>
               Request.get(fullUrl).addHeaders(buildHeaders(headers))
 
@@ -119,6 +123,14 @@ object HttpClient:
               )
             )
 
+          // Extract headers for RuntimeContext
+          responseHeaders = response.headers.toList.map(header => header.headerName -> header.renderedValue).toMap
+
+          // Store headers in RuntimeContext (if available)
+          _        <- runtimeContext match
+            case Some(ctx) => ctx.updateHeaders(responseHeaders)
+            case None      => ZIO.unit
+
           // Check status code
           _        <- ZIO.when(!response.status.isSuccess) {
             response.body.asString.flatMap { bodyText =>
@@ -126,7 +138,8 @@ object HttpClient:
                 YamlRuntimeError.HttpError(
                   url,
                   response.status.code,
-                  bodyText
+                  bodyText,
+                  responseHeaders
                 )
               )
             }
@@ -160,10 +173,25 @@ object HttpClient:
   object Live:
 
     /**
-     * ZLayer for HttpClient.
+     * ZLayer for HttpClient without RuntimeContext.
      *
-     * Depends on zio.http.Client. Use Client.default or custom client
-     * configuration.
+     * Legacy layer - headers won't be stored for backoff strategies.
      */
     val layer: ZLayer[Client, Nothing, HttpClient] =
-      ZLayer.fromFunction(Live.apply)
+      ZLayer {
+        for client <- ZIO.service[Client]
+        yield Live(client, None)
+      }
+
+    /**
+     * ZLayer for HttpClient with RuntimeContext.
+     *
+     * Headers will be stored in RuntimeContext for backoff strategies.
+     */
+    val layerWithContext: ZLayer[Client & RuntimeContext, Nothing, HttpClient] =
+      ZLayer {
+        for
+          client <- ZIO.service[Client]
+          ctx    <- ZIO.service[RuntimeContext]
+        yield Live(client, Some(ctx))
+      }

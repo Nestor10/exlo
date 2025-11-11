@@ -35,7 +35,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
       for
         // Interpret the stream
         records <- YamlInterpreter
-          .interpretStream(spec, Map.empty)
+          .interpretStream(spec)
           .runCollect
 
         // Assertions
@@ -64,7 +64,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
       )
 
       for records <- YamlInterpreter
-          .interpretStream(spec, Map.empty)
+          .interpretStream(spec)
           .runCollect
       yield assertTrue(
         records.length == 100, // JSONPlaceholder has 100 posts
@@ -89,7 +89,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
 
       for
         records <- YamlInterpreter
-          .interpretStream(spec, Map.empty)
+          .interpretStream(spec)
           .take(20) // Take first 20 to verify filtering works
           .runCollect
 
@@ -114,8 +114,12 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
         paginator = PaginationStrategy.NoPagination
       )
 
-      for records <- YamlInterpreter
-          .interpretStream(spec, Map[String, TemplateValue]("postId" -> TemplateValue.Num(1)))
+      for
+        // Set postId variable in RuntimeContext
+        _ <- RuntimeContext.setPaginationVar("postId", TemplateValue.Num(1))
+
+        records <- YamlInterpreter
+          .interpretStream(spec)
           .runCollect
       yield assertTrue(
         records.nonEmpty,
@@ -130,5 +134,7 @@ object YamlInterpreterIntegrationSpec extends ZIOSpecDefault:
     ResponseParser.Live.layer,
     Authenticator.Live.layer,
     ErrorHandlerService.live,
-    RequestExecutor.live
+    RateLimiter.Live.layer,
+    RequestExecutor.live,
+    RuntimeContext.Stub.layer
   ) @@ TestAspect.timeout(30.seconds) // Network calls can be slow

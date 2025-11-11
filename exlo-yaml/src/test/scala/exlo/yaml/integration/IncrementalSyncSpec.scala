@@ -28,28 +28,22 @@ object IncrementalSyncSpec extends ZIOSpecDefault:
       val jsonNode   = mapper.readTree(stateJson)
       val stateValue = TemplateValue.fromJsonNode(jsonNode)
 
-      // Build context with state
-      val context = Map[String, TemplateValue](
-        "state"  -> stateValue,
-        "config" -> TemplateValue.Obj(Map("api_key" -> Some(TemplateValue.Str("test-key"))))
-      )
-
-      // Render template using state
+      // Set state in RuntimeContext and render templates
       for
-        url <- TemplateEngine.render(
-          "/api/users?since={{ state.lastTimestamp }}",
-          context
+        _ <- RuntimeContext.setPaginationVar("state", stateValue)
+        _ <- RuntimeContext.setPaginationVar(
+          "config",
+          TemplateValue.Obj(Map("api_key" -> Some(TemplateValue.Str("test-key"))))
         )
 
-        idFilter <- TemplateEngine.render(
-          "id > {{ state.lastId }}",
-          context
-        )
+        url <- TemplateEngine.render("/api/users?since={{ state.lastTimestamp }}")
+
+        idFilter <- TemplateEngine.render("id > {{ state.lastId }}")
       yield assertTrue(
         url == "/api/users?since=2024-01-15T10:30:00Z",
         idFilter == "id > 100"
       )
-    }.provide(TemplateEngine.Live.layer),
+    }.provide(TemplateEngine.Live.layer, RuntimeContext.Stub.layer),
     test("handles empty state as empty object") {
       val emptyState = ""
 
@@ -60,22 +54,17 @@ object IncrementalSyncSpec extends ZIOSpecDefault:
           val mapper = new ObjectMapper()
           TemplateValue.fromJsonNode(mapper.readTree(emptyState))
 
-      val context = Map[String, TemplateValue](
-        "state"  -> stateValue,
-        "config" -> TemplateValue.Obj(Map.empty)
-      )
-
       // Template with default value when state field is missing
       for
+        _ <- RuntimeContext.setPaginationVar("state", stateValue)
+        _ <- RuntimeContext.setPaginationVar("config", TemplateValue.Obj(Map.empty))
+
         // Jinjava should handle missing fields gracefully
-        url <- TemplateEngine.render(
-          "/api/users?since={{ state.lastTimestamp | default('') }}",
-          context
-        )
+        url <- TemplateEngine.render("/api/users?since={{ state.lastTimestamp | default('') }}")
       yield assertTrue(
         url == "/api/users?since=" // Empty default
       )
-    }.provide(TemplateEngine.Live.layer),
+    }.provide(TemplateEngine.Live.layer, RuntimeContext.Stub.layer),
     test("parses nested state with multiple fields") {
       val mapper = new ObjectMapper()
 
@@ -92,27 +81,19 @@ object IncrementalSyncSpec extends ZIOSpecDefault:
       val jsonNode   = mapper.readTree(stateJson)
       val stateValue = TemplateValue.fromJsonNode(jsonNode)
 
-      val context = Map[String, TemplateValue](
-        "state" -> stateValue
-      )
-
       // Render templates using nested state values
       for
-        userCursor <- TemplateEngine.render(
-          "{{ state.cursors.users }}",
-          context
-        )
+        _ <- RuntimeContext.setPaginationVar("state", stateValue)
 
-        orderCursor <- TemplateEngine.render(
-          "{{ state.cursors.orders }}",
-          context
-        )
+        userCursor <- TemplateEngine.render("{{ state.cursors.users }}")
+
+        orderCursor <- TemplateEngine.render("{{ state.cursors.orders }}")
       yield assertTrue(
         userCursor == "user_cursor_123",
         orderCursor == "order_cursor_456"
       )
-    }.provide(TemplateEngine.Live.layer),
-    test("StateTracker updates cursor value from records") {
+    }.provide(TemplateEngine.Live.layer, RuntimeContext.Stub.layer),
+    test("RuntimeContext updates cursor value from records") {
       val mapper = new ObjectMapper()
 
       // Create some test records with timestamps
@@ -121,48 +102,57 @@ object IncrementalSyncSpec extends ZIOSpecDefault:
       val record3 = mapper.readTree("""{"id": 3, "updated_at": "2024-01-15T11:00:00Z"}""")
 
       for
-        // Update tracker with records in non-sorted order
-        _ <- StateTracker.updateFromRecord(record1, Some("updated_at"))
-        _ <- StateTracker.updateFromRecord(record2, Some("updated_at"))
-        _ <- StateTracker.updateFromRecord(record3, Some("updated_at"))
+        // Update RuntimeContext with cursor values in non-sorted order
+        _ <- RuntimeContext.updateCursor(record1.get("updated_at").asText())
+        _ <- RuntimeContext.updateCursor(record2.get("updated_at").asText())
+        _ <- RuntimeContext.updateCursor(record3.get("updated_at").asText())
 
         // Get state - should have the MAX timestamp
-        stateJson <- StateTracker.getStateJson
+        stateJson <- RuntimeContext.getStateJson
       yield
         val state = mapper.readTree(stateJson)
         assertTrue(
           state.get("cursor").asText() == "2024-01-15T12:00:00Z" // Maximum value
         )
-    }.provide(StateTracker.Live.layer),
-    test("StateTracker handles records without cursor field") {
+    }.provide(RuntimeContext.Stub.layer),
+    test("RuntimeContext handles missing cursor field gracefully") {
       val mapper = new ObjectMapper()
 
       // Record without the cursor field
       val record = mapper.readTree("""{"id": 1, "name": "Test"}""")
 
       for
-        _         <- StateTracker.updateFromRecord(record, Some("updated_at"))
-        stateJson <- StateTracker.getStateJson
+        // Don't update cursor if field is missing
+        cursor    <- ZIO.succeed(Option(record.get("updated_at")))
+        _         <- cursor match {
+          case Some(node) => RuntimeContext.updateCursor(node.asText())
+          case None       => ZIO.unit
+        }
+        stateJson <- RuntimeContext.getStateJson
       yield
-      // State should be empty since no cursor field was found
+      // State should be empty since no cursor was updated
       assertTrue(stateJson == "{}")
-    }.provide(StateTracker.Live.layer),
-    test("StateTracker resets to initial state") {
+    }.provide(RuntimeContext.Stub.layer),
+    test("RuntimeContext initializes with state from layer") {
       val mapper = new ObjectMapper()
 
-      // Start with some state
-      val record = mapper.readTree("""{"id": 1, "updated_at": "2024-01-15T10:00:00Z"}""")
-
-      for
-        _      <- StateTracker.updateFromRecord(record, Some("updated_at"))
-        state1 <- StateTracker.getStateJson
-
-        // Reset to new state
-        _      <- StateTracker.reset("""{"cursor": "2024-01-01T00:00:00Z"}""")
-        state2 <- StateTracker.getStateJson
-      yield assertTrue(
-        state1.contains("2024-01-15T10:00:00Z"),
-        state2.contains("2024-01-01T00:00:00Z")
+      // Create environment with initial cursor
+      val envWithState = ZLayer.make[RuntimeContext](
+        ZLayer.fromZIO(
+          ZIO.succeed(
+            exlo.yaml.domain.ConnectorConfig(mapper.createObjectNode())
+          )
+        ),
+        RuntimeContext.Live.layer("""{"cursor": "2024-01-01T00:00:00Z"}""")
       )
-    }.provide(StateTracker.Live.layer)
+
+      for stateJson <- RuntimeContext.getStateJson
+      yield assertTrue(stateJson.contains("2024-01-01T00:00:00Z"))
+    }.provide(
+      ZLayer.fromZIO(
+        ZIO.succeed(
+          exlo.yaml.domain.ConnectorConfig(new ObjectMapper().createObjectNode())
+        )
+      ) >>> RuntimeContext.Live.layer("""{"cursor": "2024-01-01T00:00:00Z"}""")
+    )
   )

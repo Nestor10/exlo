@@ -215,6 +215,56 @@ package object spec:
         extends ErrorHandler
 
   /**
+   * Rate limiting policy for API calls.
+   *
+   * Prevents exceeding API quotas by proactively throttling requests.
+   */
+  @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, include = JsonTypeInfo.As.PROPERTY, property = "type")
+  @JsonSubTypes(
+    Array(
+      new JsonSubTypes.Type(value = classOf[CallRatePolicy.FixedWindowCallRate], name = "FixedWindowCallRate"),
+      new JsonSubTypes.Type(value = classOf[CallRatePolicy.MovingWindowCallRate], name = "MovingWindowCallRate")
+    )
+  )
+  sealed trait CallRatePolicy
+
+  object CallRatePolicy:
+
+    /**
+     * Fixed window rate limiting.
+     *
+     * Allows N requests per window, resets at window boundaries.
+     *
+     * Example: 10 requests per 60 seconds, resets at 0:00, 1:00, 2:00, etc.
+     *
+     * @param requestsPerWindow
+     *   Maximum requests allowed in window
+     * @param windowSizeSeconds
+     *   Window duration in seconds
+     */
+    case class FixedWindowCallRate(
+      @JsonProperty("requests_per_window") requestsPerWindow: Int,
+      @JsonProperty("window_size_seconds") windowSizeSeconds: Int
+    ) extends CallRatePolicy
+
+    /**
+     * Moving/rolling window rate limiting.
+     *
+     * Allows N requests in any rolling time window (more precise).
+     *
+     * Example: 10 requests per any 60-second period.
+     *
+     * @param requestsPerWindow
+     *   Maximum requests allowed in window
+     * @param windowSizeSeconds
+     *   Window duration in seconds
+     */
+    case class MovingWindowCallRate(
+      @JsonProperty("requests_per_window") requestsPerWindow: Int,
+      @JsonProperty("window_size_seconds") windowSizeSeconds: Int
+    ) extends CallRatePolicy
+
+  /**
    * HTTP request specification.
    *
    * @param url
@@ -231,6 +281,8 @@ package object spec:
    *   Request body for POST/PUT requests (supports Jinja templates for JSON)
    * @param errorHandler
    *   Optional error handler configuration (default: retry 5xx and 429 with exponential backoff)
+   * @param callRatePolicy
+   *   Optional rate limiting policy to prevent exceeding API quotas
    */
   case class Requester(
     url: String,
@@ -239,7 +291,8 @@ package object spec:
     params: Map[String, String] = Map.empty,
     auth: Auth = Auth.NoAuth,
     body: Option[String] = None,
-    @JsonProperty("error_handler") errorHandler: Option[ErrorHandler] = None
+    @JsonProperty("error_handler") errorHandler: Option[ErrorHandler] = None,
+    @JsonProperty("call_rate_policy") callRatePolicy: Option[CallRatePolicy] = None
   )
 
   /**
@@ -373,9 +426,12 @@ package object spec:
    *
    * Can contain multiple streams (Phase 2 feature).
    *
+   * @param version
+   *   Connector version string (e.g., "1.0.0")
    * @param streams
    *   List of stream configurations
    */
   case class ConnectorSpec(
+    @JsonProperty("version") version: String = "0.1.0",
     streams: List[StreamSpec]
   )

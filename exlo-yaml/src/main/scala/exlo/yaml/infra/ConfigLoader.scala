@@ -38,49 +38,14 @@ object ConfigLoader:
   private val jsonMapper = new ObjectMapper()
 
   /**
-   * Load config from EXLO_CONNECTOR_CONFIG and validate against schema.
+   * Load connector config from EXLO_CONNECTOR_CONFIG environment variable.
    *
-   * @param connectionSpec
-   *   JSON Schema from connector's connection_specification
+   * Reads JSON string from env var and parses to ConnectorConfig.
+   *
    * @return
-   *   Validated ConnectorConfig
+   *   Connector configuration
    */
-  def loadAndValidate(connectionSpec: JsonNode): ZIO[ConfigValidator, YamlRuntimeError, ConnectorConfig] =
-    (for
-      // 1. Read env var
-      configJsonString <- System
-        .env("EXLO_CONNECTOR_CONFIG")
-        .someOrFail(
-          YamlRuntimeError.InvalidSpec(
-            "EXLO_CONNECTOR_CONFIG",
-            "Environment variable not set. Provide connector config as JSON string."
-          )
-        )
-
-      // 2. Parse JSON using Jackson
-      configNode       <- ZIO
-        .attempt(jsonMapper.readTree(configJsonString))
-        .mapError(err =>
-          YamlRuntimeError.InvalidSpec(
-            "EXLO_CONNECTOR_CONFIG",
-            s"Invalid JSON: ${err.getMessage}"
-          )
-        )
-
-      // 3. Validate against schema
-      validatedNode    <- ConfigValidator
-        .validate(configNode, connectionSpec)
-        .mapError(e => e: YamlRuntimeError) // Widen to YamlRuntimeError
-
-    // 4. Return domain model
-    yield ConnectorConfig(validatedNode)).refineToOrDie[YamlRuntimeError]
-
-  /**
-   * Load config without validation (for testing or when schema not available).
-   *
-   * Use this sparingly - prefer loadAndValidate for production code.
-   */
-  def loadUnvalidated: Task[ConnectorConfig] =
+  def load: Task[ConnectorConfig] =
     for
       configJsonString <- System
         .env("EXLO_CONNECTOR_CONFIG")

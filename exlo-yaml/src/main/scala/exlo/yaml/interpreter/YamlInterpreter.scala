@@ -26,25 +26,19 @@ import zio.stream.*
 object YamlInterpreter:
 
   /**
-   * Interpret a StreamSpec into a stream of JSON records.
+   * Interpret a stream specification into a record stream.
    *
-   * This is the main entry point that orchestrates:
-   *   1. Execute request with pagination (via RequestExecutor)
-   *   1. Extract records from each response
-   *   1. Apply optional filters
+   * Context (config, state, pagination vars) is read from RuntimeContext.
    *
    * @param spec
-   *   Stream specification from YAML
-   * @param context
-   *   Template context (config values, state)
+   *   Stream configuration from YAML
    * @return
    *   Stream of JsonNode records
    */
   def interpretStream(
-    spec: StreamSpec,
-    context: Map[String, TemplateValue]
+    spec: StreamSpec
   ): ZStream[
-    RequestExecutor & TemplateEngine & ResponseParser,
+    RequestExecutor & TemplateEngine & ResponseParser & RuntimeContext,
     Throwable,
     JsonNode
   ] =
@@ -52,36 +46,35 @@ object YamlInterpreter:
       case PaginationStrategy.NoPagination =>
         // Single page - execute once
         ZStream
-          .fromZIO(ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, context)))
-          .flatMap(response => extractRecords(response, spec.recordSelector, context))
+          .fromZIO(ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester)))
+          .flatMap(response => extractRecords(response, spec.recordSelector))
 
       case pageIncrement: PaginationStrategy.PageIncrement =>
-        interpretPageIncrement(spec, pageIncrement, context)
+        interpretPageIncrement(spec, pageIncrement)
 
       case offsetIncrement: PaginationStrategy.OffsetIncrement =>
-        interpretOffsetIncrement(spec, offsetIncrement, context)
+        interpretOffsetIncrement(spec, offsetIncrement)
 
       case cursorPagination: PaginationStrategy.CursorPagination =>
-        interpretCursorPagination(spec, cursorPagination, context)
+        interpretCursorPagination(spec, cursorPagination)
 
   /**
    * Extract records from response using RecordSelector.
+   *
+   * Context for filter evaluation is read from RuntimeContext, with record added.
    *
    * @param response
    *   JSON response from API
    * @param selector
    *   Record extraction configuration
-   * @param context
-   *   Template context for filter evaluation
    * @return
    *   Stream of extracted JSON records
    */
   private def extractRecords(
     response: JsonNode,
-    selector: RecordSelector,
-    context: Map[String, TemplateValue]
+    selector: RecordSelector
   ): ZStream[
-    TemplateEngine & ResponseParser,
+    TemplateEngine & ResponseParser & RuntimeContext,
     Throwable,
     JsonNode
   ] =
@@ -93,92 +86,90 @@ object YamlInterpreter:
         selector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            // Add record to context for filter evaluation
-            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
-            TemplateEngine.evaluateCondition(filterExpr, filterContext)
+            // Set record variable in RuntimeContext for filter evaluation
+            RuntimeContext.setPaginationVar("record", TemplateValue.fromJsonNode(record)) *>
+              TemplateEngine.evaluateCondition(filterExpr)
       }
 
   /**
    * Interpret page increment pagination.
    *
    * Continues fetching pages until no more records are returned.
+   * Page number is set in RuntimeContext for template interpolation.
    *
    * Example: /api/users?page=1, /api/users?page=2, ...
    */
   private def interpretPageIncrement(
     spec: StreamSpec,
-    pagination: PaginationStrategy.PageIncrement,
-    context: Map[String, TemplateValue]
+    pagination: PaginationStrategy.PageIncrement
   ): ZStream[
-    RequestExecutor & TemplateEngine & ResponseParser,
+    RequestExecutor & TemplateEngine & ResponseParser & RuntimeContext,
     Throwable,
     JsonNode
   ] =
     ZStream
       .unfoldZIO(pagination.startFrom) { pageNum =>
-        val pageContext = context + ("page" -> TemplateValue.Num(pageNum))
-
-        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, pageContext)).flatMap { response =>
-          ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
-            if records.isEmpty then
-              // No more records - stop pagination
-              ZIO.succeed(None)
-            else
-              // Return records and next page number
-              ZIO.succeed(Some((records, pageNum + 1)))
+        RuntimeContext.setPaginationVar("page", TemplateValue.Num(pageNum)) *>
+          ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester)).flatMap { response =>
+            ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
+              if records.isEmpty then
+                // No more records - stop pagination
+                ZIO.succeed(None)
+              else
+                // Return records and next page number
+                ZIO.succeed(Some((records, pageNum + 1)))
+            }
           }
-        }
       }
       .flatMap(records => ZStream.fromIterable(records))
       .filterZIO { record =>
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            import exlo.yaml.util.JsonUtils
-            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
-            TemplateEngine.evaluateCondition(filterExpr, filterContext)
+            // Set record variable in RuntimeContext for filter evaluation
+            RuntimeContext.setPaginationVar("record", TemplateValue.fromJsonNode(record)) *>
+              TemplateEngine.evaluateCondition(filterExpr)
       }
 
   /**
    * Interpret offset increment pagination.
    *
    * Continues fetching pages using offset/limit pattern.
+   * Offset and limit are set in RuntimeContext for template interpolation.
    *
    * Example: /api/users?offset=0&limit=50, /api/users?offset=50&limit=50, ...
    */
   private def interpretOffsetIncrement(
     spec: StreamSpec,
-    pagination: PaginationStrategy.OffsetIncrement,
-    context: Map[String, TemplateValue]
+    pagination: PaginationStrategy.OffsetIncrement
   ): ZStream[
-    RequestExecutor & TemplateEngine & ResponseParser,
+    RequestExecutor & TemplateEngine & ResponseParser & RuntimeContext,
     Throwable,
     JsonNode
   ] =
     ZStream
       .unfoldZIO(0) { offset =>
-        val offsetContext =
-          context + ("offset" -> TemplateValue.Num(offset)) + ("limit" -> TemplateValue.Num(pagination.pageSize))
-
-        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, offsetContext)).flatMap { response =>
-          ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
-            if records.isEmpty then
-              // No more records - stop pagination
-              ZIO.succeed(None)
-            else
-              // Return records and next offset
-              ZIO.succeed(Some((records, offset + pagination.pageSize)))
+        RuntimeContext.setPaginationVar("offset", TemplateValue.Num(offset)) *>
+          RuntimeContext.setPaginationVar("limit", TemplateValue.Num(pagination.pageSize)) *>
+          ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester)).flatMap { response =>
+            ResponseParser.extract(response, spec.recordSelector.extractor).flatMap { records =>
+              if records.isEmpty then
+                // No more records - stop pagination
+                ZIO.succeed(None)
+              else
+                // Return records and next offset
+                ZIO.succeed(Some((records, offset + pagination.pageSize)))
+            }
           }
-        }
       }
       .flatMap(records => ZStream.fromIterable(records))
       .filterZIO { record =>
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            import exlo.yaml.util.JsonUtils
-            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
-            TemplateEngine.evaluateCondition(filterExpr, filterContext)
+            // Set record variable in RuntimeContext for filter evaluation
+            RuntimeContext.setPaginationVar("record", TemplateValue.fromJsonNode(record)) *>
+              TemplateEngine.evaluateCondition(filterExpr)
       }
 
   /**
@@ -186,57 +177,50 @@ object YamlInterpreter:
    *
    * Uses a cursor from the response to fetch next page. Stops when stop
    * condition evaluates to true.
+   * Cursor token and response are set in RuntimeContext for template interpolation.
    *
    * Example: {"data": [...], "next_cursor": "abc123"}
    */
   private def interpretCursorPagination(
     spec: StreamSpec,
-    pagination: PaginationStrategy.CursorPagination,
-    context: Map[String, TemplateValue]
+    pagination: PaginationStrategy.CursorPagination
   ): ZStream[
-    RequestExecutor & TemplateEngine & ResponseParser,
+    RequestExecutor & TemplateEngine & ResponseParser & RuntimeContext,
     Throwable,
     JsonNode
   ] =
     ZStream
       .unfoldZIO(Option.empty[String]) { maybeCursor =>
-        val cursorContext = maybeCursor match
-          case Some(cursor) => context + ("next_page_token" -> TemplateValue.Str(cursor))
-          case None         => context
+        val setCursor = maybeCursor match
+          case Some(cursor) => RuntimeContext.setPaginationVar("next_page_token", TemplateValue.Str(cursor))
+          case None         => ZIO.unit
 
-        ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester, cursorContext)).flatMap { response =>
-          for
-            // Check stop condition
-            shouldStop <- TemplateEngine.evaluateCondition(
-              pagination.stopCondition,
-              context + ("response" -> TemplateValue.fromJsonNode(response))
-            )
+        setCursor *>
+          ZIO.serviceWithZIO[RequestExecutor](_.execute(spec.requester)).flatMap { response =>
+            // Set response in context for stop condition and cursor extraction
+            RuntimeContext.setPaginationVar("response", TemplateValue.fromJsonNode(response)) *>
+              TemplateEngine.evaluateCondition(pagination.stopCondition).flatMap { shouldStop =>
+                if shouldStop then ZIO.succeed(None)
+                else
+                  for
+                    // Extract records
+                    records    <- ResponseParser.extract(
+                      response,
+                      spec.recordSelector.extractor
+                    )
 
-            result <-
-              if shouldStop then ZIO.succeed(None)
-              else
-                for
-                  // Extract records
-                  records    <- ResponseParser.extract(
-                    response,
-                    spec.recordSelector.extractor
-                  )
-
-                  // Extract next cursor
-                  nextCursor <- TemplateEngine.render(
-                    pagination.cursorValue,
-                    context + ("response" -> TemplateValue.fromJsonNode(response))
-                  )
-                yield Some((records, Some(nextCursor)))
-          yield result
-        }
+                    // Extract next cursor
+                    nextCursor <- TemplateEngine.render(pagination.cursorValue)
+                  yield Some((records, Some(nextCursor)))
+              }
+          }
       }
       .flatMap(records => ZStream.fromIterable(records))
       .filterZIO { record =>
         spec.recordSelector.filter match
           case None             => ZIO.succeed(true)
           case Some(filterExpr) =>
-            import exlo.yaml.util.JsonUtils
-            val filterContext = context + ("record" -> TemplateValue.fromJsonNode(record))
-            TemplateEngine.evaluateCondition(filterExpr, filterContext)
+            // Set record variable in RuntimeContext for filter evaluation
+            RuntimeContext.setPaginationVar("record", TemplateValue.fromJsonNode(record)) *>
+              TemplateEngine.evaluateCondition(filterExpr)
       }
