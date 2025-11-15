@@ -68,7 +68,7 @@ object MultiStreamSpec extends ZIOSpecDefault:
         |        type: NoAuth
         |    recordSelector:
         |      extractor:
-|        type: DpathExtractor
+        |        type: DpathExtractor
         |        field_path: []
         |      filter: null
         |    paginator:

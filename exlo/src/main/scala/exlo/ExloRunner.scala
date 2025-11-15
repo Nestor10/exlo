@@ -10,7 +10,6 @@ import exlo.domain.SyncMetadata
 import exlo.infra.IcebergCatalog
 import exlo.infra.IcebergCatalogSelector
 import exlo.pipeline.PipelineOrchestrator
-import exlo.service.Connector
 import exlo.service.Table
 import zio.*
 import zio.stream.ZStream
@@ -26,76 +25,54 @@ import java.util.UUID
 object ExloRunner:
 
   /**
-   * Run EXLO pipeline.
+   * Run EXLO pipeline with a domain.Connector.
    *
    * This method:
    *   1. Loads EXLO config from ConfigProvider (set in bootstrap)
-   *   1. Creates a Connector implementation that captures user's environment R
+   *   1. Adapts domain.Connector to service.Connector for framework
    *   1. Builds framework layers with config-specific parameters
-   *   1. Runs PipelineOrchestrator with all layers
+   *   1. Runs PipelineOrchestrator with connector and framework layers
    *
-   * The key insight: We create a Connector implementation that captures the
-   * user's environment R using ZIO.environment, then provides it when extract
-   * is called. This allows the framework to wire its own layers while the
-   * user's R requirement propagates outward.
+   * The connector's environment must be provided by the caller (e.g., ExloApp.run).
    *
-   * @param connectorId
-   *   Unique identifier for this connector
-   * @param connectorVersion
-   *   Semantic version of connector logic
-   * @param extract
-   *   User's extraction function
-   * @tparam R
-   *   User's environment requirements
+   * @param connector
+   *   The domain connector to run (contains id, version, extract logic, environment)
    * @return
-   *   Effect that runs the pipeline, requires user's R
+   *   Effect that runs the pipeline, requires connector.Env
    */
-  def run[R](
-    connectorId: String,
-    connectorVersion: String,
-    extract: String => ZStream[R, Throwable, StreamElement]
-  ): ZIO[R, Throwable, Unit] =
+  def run(connector: exlo.domain.Connector): ZIO[connector.Env, Throwable, Unit] =
     ZIO.scoped {
+      // Create sync metadata
+      val syncMetadata = SyncMetadata(
+        syncId = UUID.randomUUID(),
+        startedAt = Instant.now(),
+        connectorVersion = connector.version
+      )
+
+      // Build framework layers with runtime config
+      // Each layer pulls its own config via ZIO.config - fully decoupled
+      val storageLayer = ZLayer.fromZIO(StorageConfig.load)
+
+      val frameworkLayer = ZLayer.make[IcebergCatalog & Table & StateConfig & StreamConfig](
+        storageLayer,                                   // Provides StorageConfig for catalog layer
+        IcebergCatalogSelector.layer,                   // Pulls StreamConfig via ZIO.config
+        Table.Live.layer,                               // Pulls StreamConfig via ZIO.config
+        StateConfig.layer,
+        ZLayer.fromZIO(ZIO.config(StreamConfig.config)) // Load StreamConfig from env
+      )
+
       for
-        // Capture user's environment to make it available during extract
-        userEnv <- ZIO.environment[R]
+        // Capture user environment
+        userEnv <- ZIO.environment[connector.Env]
 
-        // Create connector implementation
-        // Use separate vars to avoid shadowing
-        id           = connectorId
-        version      = connectorVersion
-        extractFn    = extract
-        connector    = new Connector {
-          override def connectorId: String = id
-          override def extract(state: String) =
-            extractFn(state)
+        // Adapt domain.Connector to service.Connector for framework
+        serviceConnector = new exlo.service.Connector:
+          override def connectorId:            String                                 = connector.id
+          override def extract(state: String): ZStream[Any, ExloError, StreamElement] =
+            connector
+              .extract(state)
               .provideEnvironment(userEnv)
-              .mapError(e =>
-                ExloError.ConnectorError(
-                  s"Connector $id failed",
-                  e
-                )
-              )
-        }
-
-        // Create sync metadata
-        syncMetadata = SyncMetadata(
-          syncId = UUID.randomUUID(),
-          startedAt = Instant.now(),
-          connectorVersion = connectorVersion
-        )
-
-        // Build framework layers with runtime config
-        // Each layer pulls its own config via ZIO.config - fully decoupled
-        storageLayer = ZLayer.fromZIO(StorageConfig.load)
-
-        frameworkLayer = ZLayer.make[IcebergCatalog & Table & StateConfig & StreamConfig](
-          storageLayer,                                   // Provides StorageConfig for catalog layer
-          IcebergCatalogSelector.layer,                   // Pulls StreamConfig via ZIO.config
-          Table.Live.layer,                               // Pulls StreamConfig via ZIO.config
-          StateConfig.layer,
-          ZLayer.fromZIO(ZIO.config(StreamConfig.config)) // Load StreamConfig from env
-        )
+              .mapError(e => ExloError.ConnectorError(s"Connector ${connector.id} failed", e))
 
         // Load sync config for orchestrator
         syncConfig <- ZIO.config(SyncConfig.config)
@@ -104,8 +81,8 @@ object ExloRunner:
         _ <- PipelineOrchestrator
           .run(syncMetadata, syncConfig.stateVersion)
           .provide(
-            ZLayer.succeed(connector), // Provide connector instance
-            frameworkLayer             // Provide all framework services
+            ZLayer.succeed(serviceConnector), // Provide service.Connector adapter
+            frameworkLayer                    // Provide all framework services
           )
           .mapError(e => new RuntimeException(s"Pipeline failed: $e"))
       yield ()

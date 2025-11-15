@@ -1,6 +1,7 @@
 package examples
 
 import exlo.*
+import exlo.domain.Connector
 import exlo.domain.StreamElement
 import zio.*
 import zio.json.*
@@ -18,29 +19,33 @@ import zio.stream.*
  */
 object PaginatedConnector extends ExloApp:
 
-  override def connectorId: String = "paginated-connector"
+  override def connector: ZIO[Any, Throwable, Connector] =
+    ZIO.succeed(
+      new Connector:
+        def id      = "paginated-connector"
+        def version = "1.0.0"
+        type Env = Any
 
-  override def connectorVersion: String = "1.0.0"
+        def extract(state: String): ZStream[Any, Throwable, StreamElement] =
+          val startPage = if state.isEmpty then 1 else parsePageFromState(state)
 
-  type Env = Any
+          ZStream
+            .unfoldZIO(startPage) { page =>
+              fetchPage(page).map {
+                case Some(data) =>
+                  val elements =
+                    data.records.map(r => StreamElement.Data(r.toJson)) :+
+                      StreamElement.Checkpoint(s"""{"page": ${page + 1}}""")
+                  Some((elements, page + 1))
 
-  override def extract(state: String): ZStream[Any, Throwable, StreamElement] =
-    val startPage = if state.isEmpty then 1 else parsePageFromState(state)
+                case None =>
+                  None // No more pages
+              }
+            }
+            .flatMap(ZStream.fromIterable)
 
-    ZStream
-      .unfoldZIO(startPage) { page =>
-        fetchPage(page).map {
-          case Some(data) =>
-            val elements =
-              data.records.map(r => StreamElement.Data(r.toJson)) :+
-                StreamElement.Checkpoint(s"""{"page": ${page + 1}}""")
-            Some((elements, page + 1))
-
-          case None =>
-            None // No more pages
-        }
-      }
-      .flatMap(ZStream.fromIterable)
+        def environment = ZLayer.empty
+    )
 
   // Simulated API call
   def fetchPage(page: Int): Task[Option[PageData]] =
@@ -60,8 +65,6 @@ object PaginatedConnector extends ExloApp:
   def parsePageFromState(state: String): Int =
     import zio.json.*
     state.fromJson[Map[String, Int]].toOption.flatMap(_.get("page")).getOrElse(1)
-
-  override def environment = ZLayer.empty
 
   case class PageData(records: List[Record])
 

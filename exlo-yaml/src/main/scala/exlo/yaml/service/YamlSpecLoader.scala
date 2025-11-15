@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import exlo.yaml.domain.YamlRuntimeError
+import exlo.yaml.infra.YamlToJsonResolver
 import exlo.yaml.spec.ConnectorSpec
 import zio.*
 
@@ -46,6 +47,22 @@ object YamlSpecLoader:
   def loadSpecDirect(path: String): IO[Throwable, ConnectorSpec] =
     Live().loadSpec(path)
 
+  /**
+   * Parse YAML string directly into ConnectorSpec.
+   *
+   * Useful for:
+   *   - Loading from environment variable (EXLO_CONNECTOR_SPEC)
+   *   - Loading from HTTP response body
+   *   - Testing with inline YAML
+   *
+   * @param yamlContent
+   *   YAML string content
+   * @return
+   *   Parsed ConnectorSpec
+   */
+  def parseYamlString(yamlContent: String): IO[Throwable, ConnectorSpec] =
+    Live.parseYamlString(yamlContent)
+
   /** Live implementation using Jackson YAML parser. */
   case class Live() extends YamlSpecLoader:
 
@@ -62,7 +79,7 @@ object YamlSpecLoader:
     override def loadSpec(path: String): IO[Throwable, ConnectorSpec] =
       for
         // Read file content
-        content  <- ZIO
+        content <- ZIO
           .attemptBlocking {
             val source = Source.fromFile(path)
             try source.mkString
@@ -75,22 +92,40 @@ object YamlSpecLoader:
             )
           )
 
+        // Parse the YAML content
+        spec    <- parseYaml(content).mapError {
+          case e: YamlRuntimeError => e
+          case e                   => YamlRuntimeError.InvalidSpec(path, e.getMessage)
+        }
+      yield spec
+
+    /**
+     * Parse YAML string into ConnectorSpec.
+     *
+     * Separated from loadSpec so it can be used for inline YAML and HTTP
+     * responses.
+     */
+    def parseYaml(yamlContent: String): IO[Throwable, ConnectorSpec] =
+      for
         // Parse YAML to JsonNode
         jsonNode <- ZIO
-          .attempt(yamlMapper.readTree(content))
+          .attempt(yamlMapper.readTree(yamlContent))
           .mapError(e =>
             YamlRuntimeError.InvalidSpec(
-              path,
+              "<inline>",
               s"Failed to parse YAML: ${e.getMessage}"
             )
           )
 
+        // Resolve $ref references
+        resolved <- YamlToJsonResolver.resolveYaml(yamlContent)
+
         // Deserialize JsonNode to ConnectorSpec
-        spec     <- ZIO
-          .attempt(jsonMapper.treeToValue(jsonNode, classOf[ConnectorSpec]))
+        spec <- ZIO
+          .attempt(jsonMapper.treeToValue(resolved, classOf[ConnectorSpec]))
           .mapError(e =>
             YamlRuntimeError.InvalidSpec(
-              path,
+              "<inline>",
               s"Failed to decode ConnectorSpec: ${e.getMessage}"
             )
           )
@@ -105,3 +140,11 @@ object YamlSpecLoader:
      */
     val layer: ULayer[YamlSpecLoader] =
       ZLayer.succeed(Live())
+
+    /**
+     * Parse YAML string without needing a service instance.
+     *
+     * Exposed as a static method for convenience.
+     */
+    def parseYamlString(yamlContent: String): IO[Throwable, ConnectorSpec] =
+      Live().parseYaml(yamlContent)

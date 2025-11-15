@@ -28,7 +28,7 @@ trait RequestExecutor:
    */
   def execute(
     requester: Requester
-  ): ZIO[RuntimeContext, Throwable, JsonNode]
+  ): ZIO[RuntimeContext & TemplateEngine, Throwable, JsonNode]
 
 object RequestExecutor:
 
@@ -60,7 +60,7 @@ object RequestExecutor:
 
     def execute(
       requester: Requester
-    ): ZIO[RuntimeContext, Throwable, JsonNode] =
+    ): ZIO[RuntimeContext & TemplateEngine, Throwable, JsonNode] =
       for
         // Check rate limit before executing request
         _               <- requester.callRatePolicy match

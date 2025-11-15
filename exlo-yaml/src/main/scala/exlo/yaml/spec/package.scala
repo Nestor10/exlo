@@ -1,5 +1,12 @@
 package exlo.yaml
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.annotation.JsonSubTypes
+import com.fasterxml.jackson.annotation.JsonTypeInfo
+import com.fasterxml.jackson.annotation.JsonTypeInfo.As
+import com.fasterxml.jackson.annotation.JsonTypeInfo.Id
+
 /**
  * Domain models for Airbyte-style YAML connector specifications.
  *
@@ -29,8 +36,11 @@ package object spec:
     Array(
       new JsonSubTypes.Type(value = classOf[Auth.NoAuth.type], name = "NoAuth"),
       new JsonSubTypes.Type(value = classOf[Auth.ApiKey], name = "ApiKey"),
+      new JsonSubTypes.Type(value = classOf[Auth.ApiKeyAuthenticator], name = "ApiKeyAuthenticator"),
       new JsonSubTypes.Type(value = classOf[Auth.Bearer], name = "Bearer"),
-      new JsonSubTypes.Type(value = classOf[Auth.OAuth], name = "OAuth")
+      new JsonSubTypes.Type(value = classOf[Auth.BearerAuthenticator], name = "BearerAuthenticator"),
+      new JsonSubTypes.Type(value = classOf[Auth.OAuth], name = "OAuth"),
+      new JsonSubTypes.Type(value = classOf[Auth.SelectiveAuth], name = "SelectiveAuthenticator")
     )
   )
   sealed trait Auth
@@ -52,12 +62,53 @@ package object spec:
     case class ApiKey(header: String, token: String) extends Auth
 
     /**
+     * Airbyte-compatible ApiKeyAuthenticator with inject_into configuration.
+     *
+     * Maps to ApiKey internally, extracting header name from inject_into.
+     *
+     * @param apiToken
+     *   API token value (supports Jinja templates: "{{ config['api_key'] }}")
+     * @param injectInto
+     *   Configuration for where to inject the API key
+     */
+    case class ApiKeyAuthenticator(
+      @JsonProperty("api_token") apiToken: String,
+      @JsonProperty("inject_into") injectInto: InjectInto
+    ) extends Auth
+
+    /**
+     * Configuration for where to inject authentication credentials.
+     *
+     * Used by ApiKeyAuthenticator to specify header name and location.
+     *
+     * @param fieldName
+     *   Header or query parameter name (e.g., "X-Api-Key")
+     * @param injectInto
+     *   Location to inject: "header" or "request_parameter"
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    case class InjectInto(
+      @JsonProperty("field_name") fieldName: String,
+      @JsonProperty("inject_into") injectInto: String
+    )
+
+    /**
      * Bearer token authentication.
      *
      * @param token
      *   Bearer token value (supports Jinja templates: "{{ config.token }}")
      */
     case class Bearer(token: String) extends Auth
+
+    /**
+     * Airbyte-compatible BearerAuthenticator.
+     *
+     * Maps to Bearer internally, but uses Airbyte's field name.
+     *
+     * @param apiToken
+     *   Bearer token value (supports Jinja templates: "{{ config.credentials.api_token }}")
+     */
+    case class BearerAuthenticator(@JsonProperty("api_token") apiToken: String) extends Auth
 
     /**
      * OAuth 2.0 Client Credentials flow.
@@ -78,6 +129,33 @@ package object spec:
       clientId: String,
       clientSecret: String,
       scopes: Option[String] = None
+    ) extends Auth
+
+    /**
+     * Selective authentication based on runtime config value.
+     *
+     * Reads a config path and uses it to select which authenticator to use.
+     *
+     * Example:
+     * ```yaml
+     * type: SelectiveAuthenticator
+     * authenticator_selection_path: ["credentials", "option_title"]
+     * authenticators:
+     *   "API Token Credentials": "#/definitions/api_token_auth"
+     *   "OAuth2.0": "#/definitions/oauth_auth"
+     * ```
+     *
+     * If config.credentials.option_title == "API Token Credentials",
+     * uses the api_token_auth authenticator.
+     *
+     * @param selectionPath
+     *   JSON path to read from config (e.g., ["credentials", "option_title"])
+     * @param authenticators
+     *   Map from selector value to authenticator definition
+     */
+    case class SelectiveAuth(
+      @JsonProperty("authenticator_selection_path") selectionPath: List[String],
+      authenticators: Map[String, Auth]
     ) extends Auth
 
   /**
@@ -102,6 +180,7 @@ package object spec:
    * @param predicate
    *   Optional Jinja template boolean expression (e.g., "{{ 'code' in response }}")
    */
+  @JsonIgnoreProperties(ignoreUnknown = true)
   case class HttpResponseFilter(
     action: ResponseAction,
     @JsonProperty("http_codes") httpCodes: List[Int] = List.empty,
@@ -430,7 +509,10 @@ package object spec:
    *   Connector version string (e.g., "1.0.0")
    * @param streams
    *   List of stream configurations
+   * @param definitions
+   *   Optional definitions section for $ref resolution (ignored after parsing)
    */
+  @JsonIgnoreProperties(ignoreUnknown = true)
   case class ConnectorSpec(
     @JsonProperty("version") version: String = "0.1.0",
     streams: List[StreamSpec]

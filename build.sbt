@@ -79,6 +79,9 @@ lazy val exloYaml = project
     name         := "exlo-yaml",
     version      := "0.1.0-SNAPSHOT",
     scalaVersion := scala3Version,
+
+    // Pass .env variables to test environment
+    Test / envVars := (Test / envFromFile).value,
     libraryDependencies ++= Seq(
       // Jackson 2.20.x (aligned with Iceberg/Nessie dependencies)
       "com.fasterxml.jackson.core"       % "jackson-databind"        % "2.20.0",
@@ -96,8 +99,8 @@ lazy val exloYaml = project
       // Jinja2 templating
       "com.hubspot.jinjava" % "jinjava" % "2.7.2",
 
-      // JSON Schema validation
-      "com.networknt" % "json-schema-validator" % "1.5.5",
+      // JSON Schema $ref resolution
+      "io.zenwave360" % "json-schema-ref-parser-jvm" % "0.9.3",
 
       // Testing
       "dev.zio" %% "zio-test"     % zioVersion % Test,

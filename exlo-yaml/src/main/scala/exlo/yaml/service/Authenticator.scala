@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.scala.DefaultScalaModule
 import exlo.yaml.domain.YamlRuntimeError
 import exlo.yaml.spec.Auth
+import exlo.yaml.template.TemplateValue
 import zio.*
 import zio.http.*
 
@@ -31,7 +32,7 @@ trait Authenticator:
   def authenticate(
     auth: Auth,
     existingHeaders: Map[String, String]
-  ): IO[Throwable, Map[String, String]]
+  ): ZIO[RuntimeContext & TemplateEngine, Throwable, Map[String, String]]
 
 object Authenticator:
 
@@ -43,7 +44,7 @@ object Authenticator:
   def authenticate(
     auth: Auth,
     existingHeaders: Map[String, String]
-  ): ZIO[Authenticator, Throwable, Map[String, String]] =
+  ): ZIO[Authenticator & RuntimeContext & TemplateEngine, Throwable, Map[String, String]] =
     ZIO.serviceWithZIO[Authenticator](_.authenticate(auth, existingHeaders))
 
   /** OAuth token cache entry. */
@@ -66,7 +67,7 @@ object Authenticator:
     override def authenticate(
       auth: Auth,
       existingHeaders: Map[String, String]
-    ): IO[Throwable, Map[String, String]] =
+    ): ZIO[RuntimeContext & TemplateEngine, Throwable, Map[String, String]] =
       auth match
         case Auth.NoAuth =>
           ZIO.succeed(existingHeaders)
@@ -74,11 +75,107 @@ object Authenticator:
         case Auth.ApiKey(headerName, value) =>
           ZIO.succeed(existingHeaders + (headerName -> value))
 
+        case Auth.ApiKeyAuthenticator(apiToken, injectInto) =>
+          // Airbyte's ApiKeyAuthenticator with inject_into configuration
+          // Render the api_token template (supports {{ config['api_key'] }})
+          for
+            templateEngine <- ZIO.service[TemplateEngine]
+            renderedToken  <- templateEngine.render(apiToken)
+            headers        <- injectInto.injectInto match
+              case "header"            =>
+                ZIO.succeed(existingHeaders + (injectInto.fieldName -> renderedToken))
+              case "request_parameter" =>
+                // For query params, we'd need to modify the request URL
+                // For now, treat as header (will be enhanced in future)
+                ZIO.succeed(existingHeaders + (injectInto.fieldName -> renderedToken))
+              case other               =>
+                ZIO.fail(
+                  YamlRuntimeError.AuthError(
+                    s"Unsupported inject_into location: $other. Supported: header, request_parameter"
+                  )
+                )
+          yield headers
+
         case Auth.Bearer(token) =>
           ZIO.succeed(existingHeaders + ("Authorization" -> s"Bearer $token"))
 
+        case Auth.BearerAuthenticator(apiToken) =>
+          // Airbyte's BearerAuthenticator uses api_token field
+          ZIO.succeed(existingHeaders + ("Authorization" -> s"Bearer $apiToken"))
+
         case oauth: Auth.OAuth =>
           obtainOAuthToken(oauth).map(token => existingHeaders + ("Authorization" -> s"Bearer $token"))
+
+        case Auth.SelectiveAuth(selectionPath, authenticators) =>
+          resolveSelectiveAuth(selectionPath, authenticators, existingHeaders)
+
+    /**
+     * Resolve SelectiveAuth by reading config path and selecting authenticator.
+     *
+     * @param selectionPath
+     *   JSON path to read from config (e.g., ["credentials", "option_title"])
+     * @param authenticators
+     *   Map from selector value to authenticator
+     * @param existingHeaders
+     *   Current request headers
+     * @return
+     *   Updated headers with selected auth applied
+     */
+    private def resolveSelectiveAuth(
+      selectionPath: List[String],
+      authenticators: Map[String, Auth],
+      existingHeaders: Map[String, String]
+    ): ZIO[RuntimeContext & TemplateEngine, Throwable, Map[String, String]] =
+      for
+        // Read config to get selector value
+        templateContext <- RuntimeContext.getTemplateContext
+
+        // Navigate the config path to find selector value
+        selectorValue <- ZIO
+          .attempt {
+            // Start with config from template context
+            var current: TemplateValue = templateContext.getOrElse(
+              "config",
+              throw new RuntimeException(s"Config not available in runtime context")
+            )
+
+            // Navigate through each path segment
+            selectionPath.foreach { key =>
+              current match
+                case TemplateValue.Obj(map) =>
+                  current = map
+                    .get(key)
+                    .flatten
+                    .getOrElse(
+                      throw new RuntimeException(s"Path component '$key' not found")
+                    )
+                case _                      =>
+                  throw new RuntimeException(s"Expected Obj at path component '$key', got: $current")
+            }
+
+            // Extract final string value
+            current match
+              case TemplateValue.Str(s) => s
+              case other                => throw new RuntimeException(s"Expected Str value, got: $other")
+          }
+          .mapError(e =>
+            YamlRuntimeError.AuthError(
+              s"Failed to read authenticator selection path ${selectionPath.mkString(".")}: ${e.getMessage}"
+            )
+          )
+
+        // Look up selected authenticator
+        selectedAuth  <- ZIO
+          .fromOption(authenticators.get(selectorValue))
+          .mapError(_ =>
+            YamlRuntimeError.AuthError(
+              s"No authenticator found for selector value '$selectorValue'. Available: ${authenticators.keys.mkString(", ")}"
+            )
+          )
+
+        // Recursively authenticate with selected authenticator
+        result        <- authenticate(selectedAuth, existingHeaders)
+      yield result
 
     /**
      * Obtain OAuth token (from cache or by requesting new one).

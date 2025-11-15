@@ -1,0 +1,24 @@
+version: 1.0.0
+streams:
+  - name: top_headlines
+    requester:
+      url: https://newsapi.org/v2/top-headlines
+      method: GET
+      auth:
+        type: ApiKeyAuthenticator
+        api_token: "{{ config['api_key'] }}"
+        inject_into:
+          type: RequestOption
+          field_name: X-Api-Key
+          inject_into: header
+      params:
+        country: "{{ config['country'] }}"
+        category: "{{ config['category'] }}"
+        pageSize: "10"
+    recordSelector:
+      extractor:
+        type: DpathExtractor
+        field_path:
+          - articles
+    paginator:
+      type: NoPagination

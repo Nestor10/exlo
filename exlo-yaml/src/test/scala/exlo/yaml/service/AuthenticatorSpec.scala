@@ -68,5 +68,7 @@ object AuthenticatorSpec extends ZIOSpecDefault:
     }
   ).provide(
     Client.default,
-    Authenticator.Live.layer
+    Authenticator.Live.layer,
+    RuntimeContext.Stub.layer,
+    TemplateEngine.Live.layer
   )

@@ -1,6 +1,7 @@
 package exlo
 
 import exlo.config.ExloConfigProvider
+import exlo.domain.Connector
 import exlo.domain.StreamElement
 import zio.*
 import zio.stream.ZStream
@@ -8,72 +9,34 @@ import zio.stream.ZStream
 /**
  * Base trait for EXLO connectors.
  *
- * Users extend this trait and implement:
- * - connectorId: Unique identifier
- * - connectorVersion: Semantic version
- * - extract: State => Stream of data/checkpoints
- *
- * Optionally override:
- * - environment: ZLayer providing user dependencies (default: ZLayer.empty)
- * - bootstrap: ConfigProvider setup (default: ExloConfigProvider.default)
+ * Implement `connector` method to return a Connector instance loaded inside
+ * ZIO context. This solves the phase mismatch problem where metadata loading
+ * requires effects (file I/O, HTTP, config parsing).
  *
  * Example:
  * {{{
  * object MyConnector extends ExloApp {
- *   override def connectorId = "my-connector"
- *   override def connectorVersion = "1.0.0"
- *   override def extract(state: String) =
- *     ZStream(
- *       StreamElement.Data("""{"id": 1}"""),
- *       StreamElement.Checkpoint("""{"cursor": "done"}""")
- *     )
+ *   override def connector: ZIO[Any, Throwable, Connector] =
+ *     for
+ *       spec <- loadYamlSpec("connector.yaml")
+ *     yield new Connector:
+ *       def id = "my-connector"
+ *       def version = spec.version  // Loaded from spec!
+ *       type Env = MyEnv
+ *       def extract(state: String) = ZStream(...)
+ *       def environment = ZLayer.make[Env](...)
  * }
  * }}}
  */
 trait ExloApp extends ZIOAppDefault:
 
   /**
-   * Unique identifier for this connector.
+   * Load connector with metadata inside ZIO context.
    *
-   * Example: "shopify-orders", "stripe-charges"
+   * Override this method to load metadata effectfully (from files, HTTP, config, etc.)
+   * without resorting to Unsafe runtime or lazy vals.
    */
-  def connectorId: String
-
-  /**
-   * Semantic version of connector logic.
-   *
-   * Used for reproducibility and debugging.
-   * Example: "1.0.0", "2.1.0"
-   */
-  def connectorVersion: String
-
-  /**
-   * User's extraction logic.
-   *
-   * @param state
-   *   JSON string with extraction state (cursor, page, timestamp)
-   * @return
-   *   Stream of data records and checkpoints
-   */
-  type Env
-  def extract(state: String): ZStream[Env, Throwable, StreamElement]
-
-  /**
-   * User's environment layer.
-   *
-   * Provide your dependencies here (HTTP clients, databases, etc.). Framework layers
-   * (StorageConfig, IcebergCatalog, Table) are added automatically.
-   *
-   * Example:
-   * {{{
-   * type Env = Client & MyConfig
-   * override def environment = ZLayer.make[Env](
-   *   Client.default,
-   *   MyConfig.layer
-   * )
-   * }}}
-   */
-  def environment: ZLayer[Any, Any, Env]
+  def connector: ZIO[Any, Throwable, Connector]
 
   /**
    * ConfigProvider setup.
@@ -90,17 +53,10 @@ trait ExloApp extends ZIOAppDefault:
    * Run the connector.
    *
    * This is the entry point - framework handles everything:
-   * 1. Load EXLO config from environment (via bootstrap ConfigProvider)
-   * 2. Build infrastructure layers (StorageConfig, IcebergCatalog, Table)
-   * 3. Run PipelineOrchestrator with user's extract function
-   *
-   * User only needs to provide their environment layer.
+   * 1. Load connector (with metadata)
+   * 2. Load EXLO config from environment (via bootstrap ConfigProvider)
+   * 3. Build infrastructure layers (StorageConfig, IcebergCatalog, Table)
+   * 4. Run PipelineOrchestrator with connector's extract function
    */
   override def run: ZIO[Any, Any, Unit] =
-    ExloRunner
-      .run(connectorId, connectorVersion, extract)
-      .provide(environment)
-      .catchAll(e =>
-        ZIO.logError(s"Connector failed: $e") *>
-          ZIO.fail(e)
-      )
+    connector.flatMap(c => ExloRunner.run(c).provide(c.environment))

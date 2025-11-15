@@ -1,6 +1,7 @@
 package examples
 
 import exlo.*
+import exlo.domain.Connector
 import exlo.domain.StreamElement
 import zio.*
 import zio.json.*
@@ -20,28 +21,32 @@ import java.time.Instant
  */
 object IncrementalConnector extends ExloApp:
 
-  override def connectorId: String = "incremental-connector"
+  override def connector: ZIO[Any, Throwable, Connector] =
+    ZIO.succeed(
+      new Connector:
+        def id      = "incremental-connector"
+        def version = "1.0.0"
+        type Env = Any
 
-  override def connectorVersion: String = "1.0.0"
+        def extract(state: String): ZStream[Any, Throwable, StreamElement] =
+          val lastTimestamp =
+            if state.isEmpty then Instant.parse("2024-01-01T00:00:00Z")
+            else parseTimestampFromState(state)
 
-  type Env = Any
+          for
+            _ <- ZStream.fromZIO(ZIO.logInfo(s"Fetching records since $lastTimestamp"))
 
-  override def extract(state: String): ZStream[Any, Throwable, StreamElement] =
-    val lastTimestamp =
-      if state.isEmpty then Instant.parse("2024-01-01T00:00:00Z")
-      else parseTimestampFromState(state)
+            // Simulate fetching records modified after timestamp
+            records <- ZStream.fromZIO(fetchRecordsSince(lastTimestamp))
 
-    for
-      _ <- ZStream.fromZIO(ZIO.logInfo(s"Fetching records since $lastTimestamp"))
+            _ <- ZStream.fromIterable(records).map(r => StreamElement.Data(r.toJson))
 
-      // Simulate fetching records modified after timestamp
-      records <- ZStream.fromZIO(fetchRecordsSince(lastTimestamp))
+            // Save latest timestamp as checkpoint
+            latestTimestamp = records.map(_.modifiedAt).maxOption.getOrElse(lastTimestamp)
+          yield StreamElement.Checkpoint(s"""{"lastTimestamp": "$latestTimestamp"}""")
 
-      _ <- ZStream.fromIterable(records).map(r => StreamElement.Data(r.toJson))
-
-      // Save latest timestamp as checkpoint
-      latestTimestamp = records.map(_.modifiedAt).maxOption.getOrElse(lastTimestamp)
-    yield StreamElement.Checkpoint(s"""{"lastTimestamp": "$latestTimestamp"}""")
+        def environment = ZLayer.empty
+    )
 
   def fetchRecordsSince(timestamp: Instant): Task[List[Record]] =
     ZIO.succeed(
@@ -51,8 +56,6 @@ object IncrementalConnector extends ExloApp:
         Record(3, "Charlie", timestamp.plusSeconds(300))
       )
     )
-
-  override def environment = ZLayer.empty
 
   def parseTimestampFromState(state: String): Instant =
     import zio.json.*
