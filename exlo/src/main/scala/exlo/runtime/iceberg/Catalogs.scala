@@ -5,6 +5,7 @@ import org.apache.iceberg.{CatalogProperties, PartitionSpec, Table}
 import org.apache.iceberg.aws.glue.GlueCatalog
 import org.apache.iceberg.catalog.{Catalog, TableIdentifier}
 import org.apache.iceberg.hadoop.HadoopCatalog
+import org.apache.iceberg.rest.RESTCatalog
 import zio.*
 
 import scala.jdk.CollectionConverters.*
@@ -25,8 +26,9 @@ object Catalogs:
 
   /** Make a Scoped `Catalog` from a [[CatalogConfig]]. */
   def make(config: CatalogConfig): RIO[Scope, Catalog] = config match
-    case CatalogConfig.Glue(warehouse, region)  => makeGlue(warehouse, region)
-    case CatalogConfig.Hadoop(warehouse)        => makeHadoop(warehouse)
+    case CatalogConfig.S3Tables(warehouse, region) => makeS3Tables(warehouse, region)
+    case CatalogConfig.Glue(warehouse, region)     => makeGlue(warehouse, region)
+    case CatalogConfig.Hadoop(warehouse)           => makeHadoop(warehouse)
 
   /** ZLayer that resolves the `Catalog` from `CatalogConfig` in the env. */
   val layer: ZLayer[CatalogConfig, Throwable, Catalog] = ZLayer.scoped {
@@ -38,6 +40,34 @@ object Catalogs:
     ZLayer.fromZIO(CatalogConfig.fromEnv) >>> layer
 
   // ---- factories -------------------------------------------------------------------------
+
+  /**
+   * Amazon S3 Tables via the Iceberg REST Catalog spec. The catalog endpoint is regional
+   * (`https://s3tables.<region>.amazonaws.com/iceberg`); the warehouse is the table-bucket
+   * ARN. Auth is AWS SigV4 signed for the `s3tables` service — the SDK v2 default
+   * credential chain (IAM role / IRSA / AWS_PROFILE / etc.) supplies the credentials.
+   *
+   * `RESTCatalog` ships in `iceberg-core`; no extra deps needed for this path.
+   */
+  private def makeS3Tables(warehouse: String, region: String): RIO[Scope, Catalog] =
+    ZIO.fromAutoCloseable {
+      ZIO.attemptBlocking {
+        val catalog = new RESTCatalog()
+        val props = Map(
+          CatalogProperties.URI                -> s"https://s3tables.$region.amazonaws.com/iceberg",
+          CatalogProperties.WAREHOUSE_LOCATION -> warehouse,
+          CatalogProperties.FILE_IO_IMPL       -> "org.apache.iceberg.aws.s3.S3FileIO",
+          "client.region"                      -> region,
+          // Iceberg 1.10's REST catalog AWS SigV4 integration: signing-name targets the
+          // `s3tables` service rather than the default `execute-api`.
+          "rest.auth.type"                     -> "sigv4",
+          "rest.sigv4-signer-region"           -> region,
+          "rest.signing-name"                  -> "s3tables"
+        )
+        catalog.initialize("exlo-s3tables", props.asJava)
+        catalog
+      }
+    }
 
   private def makeGlue(warehouse: String, region: Option[String]): RIO[Scope, Catalog] =
     ZIO.fromAutoCloseable {
