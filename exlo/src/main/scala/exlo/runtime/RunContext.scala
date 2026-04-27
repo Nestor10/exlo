@@ -23,12 +23,14 @@ object RunContext:
     Unsafe.unsafe(implicit u => FiberRef.unsafe.make("0.0.0"))
 
   /**
-   * Stream name within a multi-stream connector (e.g. `tickets`, `ticket_metrics`).
-   * Empty string for single-stream apps. Set by `StreamRegistry.runSelected` from
-   * `EXLO_STREAM`; left as `""` otherwise.
+   * Stream name within the connector source (e.g. `tickets`, `ticket_metrics`, `kalos`).
+   * Every connector ships through a `StreamRegistry` — even single-stream sources
+   * register exactly one entry — so this is always populated by
+   * `StreamRegistry.runSelected` from `EXLO_STREAM`. The default `unset` is a loud
+   * sentinel: if it shows up in destination records, something bypassed the registry.
    */
   val streamName: FiberRef[String] =
-    Unsafe.unsafe(implicit u => FiberRef.unsafe.make(""))
+    Unsafe.unsafe(implicit u => FiberRef.unsafe.make("unset"))
 
   /**
    * Scope a connector run's context. Inside `zio`, the connector-identity FiberRefs hold

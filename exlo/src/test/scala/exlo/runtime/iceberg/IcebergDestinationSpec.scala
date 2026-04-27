@@ -121,18 +121,22 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
         states == List(Some(TestState("c1", 1)), Some(TestState("c2", 2)))
       )
     },
-    test("records carry framework-managed metadata columns (sync_id, connector, version, recorded_at)") {
+    test("records carry framework-managed metadata columns (sync_id, connector, version, stream, recorded_at)") {
       for
         path  <- ZIO.service[Path]
         table <- freshTable(path, "tbl-metadata")
         dest  <- IcebergDestination.fromTable[TestState](table)
-        // RunContext sets the FiberRefs that IcebergDestination reads when stamping records.
-        _ <- RunContext.withRun(
-               syncIdValue           = "test-sync-id-abc",
-               connectorIdValue      = "metadata-test",
-               connectorVersionValue = "9.9.9"
-             ) {
-               dest.writeRecords(Chunk("hello-world")) *> dest.commit(TestState("c1", 1))
+        // RunContext + streamName set the FiberRefs that IcebergDestination reads when stamping
+        // records. In production, StreamRegistry.runSelected wraps these together; tests do it
+        // by hand.
+        _ <- RunContext.streamName.locally("test-stream") {
+               RunContext.withRun(
+                 syncIdValue           = "test-sync-id-abc",
+                 connectorIdValue      = "metadata-test",
+                 connectorVersionValue = "9.9.9"
+               ) {
+                 dest.writeRecords(Chunk("hello-world")) *> dest.commit(TestState("c1", 1))
+               }
              }
         _ <- ZIO.attemptBlocking(table.refresh())
         records <- ZIO.attemptBlocking[List[Record]] {
@@ -156,6 +160,7 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
         record.getField("exlo_sync_id")           == "test-sync-id-abc",
         record.getField("exlo_connector")         == "metadata-test",
         record.getField("exlo_connector_version") == "9.9.9",
+        record.getField("exlo_stream")            == "test-stream",
         record.getField("exlo_recorded_at") != null
       )
     },

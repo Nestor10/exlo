@@ -89,8 +89,9 @@ object IcebergDestination:
    *   - `exlo_sync_id`: per-run UUID, ties rows to log lines tagged with `sync_id`.
    *   - `exlo_connector`: connector id / source (e.g. `zendesk`, `pokeapi-kalos`).
    *   - `exlo_connector_version`: connector's semver.
-   *   - `exlo_stream`: stream name within a multi-stream connector (e.g. `tickets`,
-   *     `ticket_metrics`). Empty string for single-stream apps.
+   *   - `exlo_stream`: stream name within the connector source (e.g. `tickets`,
+   *     `ticket_metrics`, `kalos`). Always populated — every connector ships through a
+   *     `StreamRegistry` and selects its stream via `EXLO_STREAM`.
    *
    * Field IDs are stable; adding new fields means appending with a higher ID.
    */
