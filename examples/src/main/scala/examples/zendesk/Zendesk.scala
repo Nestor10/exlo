@@ -1,42 +1,37 @@
 package examples.zendesk
 
 import exlo.Exlo
-import exlo.domain.Connector
-import exlo.http.HttpExtract
+import exlo.domain.SlicedConnector
+import exlo.http.HttpSlice
 import exlo.runtime.{DestinationFactory, SinkConfig, StreamRegistry}
 import zio.*
 import zio.http.*
 import zio.json.*
 import zio.json.ast.Json
+import zio.stream.ZStream
+
+import java.time.{Instant, OffsetDateTime, ZoneOffset}
 
 /**
- * Zendesk source — a family of streams over the same `https://<subdomain>.zendesk.com/api/v2`
- * base URL, with shared basic auth and the same `links.next` cursor pagination pattern.
+ * Zendesk source — slice-based connectors for both `/api/v2/incremental/<resource>`
+ * (server-side time-window filtering) and standard `/api/v2/<resource>` (client-side
+ * stop on slice.start crossing). Both share auth + the same slice/state model.
  *
- * Demonstrates the multi-stream pattern: one source, many endpoints, one sbt project, one
- * Docker image. Stream selection happens at runtime via `EXLO_STREAM`.
+ * Why slices: the slice's `start`/`end` give a hard time-window boundary that's visible
+ * to `nextRequest`, so we get clean incremental-stop semantics without the cursor-juggling
+ * the v0.1 Python connector needed.
+ *
+ * State across runs:
+ *   - `done: Set[Window]` — completed time windows. STM-atomic per slice; out-of-order
+ *     completion is handled because we track the SET, not a single watermark. Resume
+ *     filters this set.
+ *   - For long-running deploys with daily windows over many years, the done set grows
+ *     linearly. Compaction (rolling contiguous prefix into an hwm) is a TODO; documented
+ *     in CONFIG.md.
  *
  * Streams in this registry:
- *   - `tickets`         — `/tickets` endpoint
- *   - `ticket_metrics`  — `/ticket_metrics` endpoint
- *
- * Real connectors would also include `users`, `organizations`, `audits`, etc. — same
- * structure, different `endpointPath` + `recordsKey`.
- *
- * Run:
- * {{{
- *   ZENDESK_SUBDOMAIN=mycorp \
- *   ZENDESK_USERNAME=user@example.com \
- *   ZENDESK_PASSWORD=*** \
- *   EXLO_STREAM=tickets \
- *   EXLO_DESTINATION=iceberg \
- *   EXLO_CATALOG_TYPE=s3tables \
- *   EXLO_CATALOG_WAREHOUSE=arn:aws:s3tables:... \
- *   EXLO_CATALOG_REGION=us-east-1 \
- *   EXLO_TABLE_NAMESPACE=zendesk \
- *   EXLO_TABLE_NAME=tickets \
- *   sbt 'examples/runMain examples.zendesk.ZendeskApp'
- * }}}
+ *   - `tickets`         — `/incremental/tickets` (server-side filter)
+ *   - `ticket_metrics`  — `/ticket_metrics` (no /incremental endpoint; client-side stop)
  */
 object Zendesk:
 
@@ -54,55 +49,50 @@ object Zendesk:
 
     def fromEnv: ZIO[Any, Config.Error, Creds] = ZIO.config(config)
 
-  /** Cursor state shared across all Zendesk streams (each table has its own cursor). */
-  final case class State(cursor: String)
-  given JsonCodec[State] = DeriveJsonCodec.gen[State]
+  /** A time window, unix-epoch seconds. */
+  final case class Window(start: Long, end: Long)
+  object Window:
+    given JsonCodec[Window] = DeriveJsonCodec.gen[Window]
 
-  // ---- shared response shape + parser ------------------------------------------------------
+  /** Per-resource state: which windows have been fully processed. */
+  final case class State(done: Set[Window] = Set.empty)
+  object State:
+    given JsonCodec[State] = DeriveJsonCodec.gen[State]
+    val zero: State        = State(Set.empty)
+
+  // ---- response shapes + parsers -----------------------------------------------------------
 
   /**
-   * Generic Zendesk page envelope. Tracks both the newest (`maxUpdated`) and oldest
-   * (`minUpdated`) record on the page — newest advances the cursor, oldest determines
-   * when to stop pagination on incremental runs.
+   * Unified parsed page. For `/incremental` endpoints, `nextUrl` comes from the response's
+   * `next_page` field; for standard endpoints it comes from `links.next`. `minUpdated` is
+   * used by the standard-endpoint slice-stop check.
    */
   final case class Page(
       records: List[Json],
-      maxUpdated: Option[String],
       minUpdated: Option[String],
       nextUrl: Option[String]
   )
 
-  /** Build a parser keyed by the records' top-level array key (e.g. `tickets`, `ticket_metrics`). */
-  def parsePage(recordsKey: String): Response => ZIO[Any, Throwable, Page] = resp =>
+  /** Parser for `/api/v2/incremental/<resource>` envelope. */
+  def parseIncrementalPage(resource: String): Response => ZIO[Any, Throwable, Page] = resp =>
     resp.body.asString.flatMap { body =>
       ZIO
         .fromEither(body.fromJson[Json])
         .mapError(e => new RuntimeException(s"json parse: $e"))
         .flatMap {
           case Json.Obj(fields) =>
-            val records = fields.find(_._1 == recordsKey).map(_._2) match
+            val records = fields.find(_._1 == resource).map(_._2) match
               case Some(Json.Arr(items)) => items.toList
               case _                     => Nil
-
-            val updatedAts = records.flatMap {
-              case Json.Obj(rec) =>
-                rec.find(_._1 == "updated_at").map(_._2) match
-                  case Some(Json.Str(s)) => Some(s)
-                  case _                 => None
-              case _ => None
-            }
-
-            val nextUrl = fields.find(_._1 == "links").map(_._2) match
-              case Some(Json.Obj(links)) =>
-                links.find(_._1 == "next").map(_._2) match
-                  case Some(Json.Str(s)) => Some(s)
-                  case _                 => None
-              case _ => None
-
+            val updatedAts = recordUpdatedAts(records)
+            val nextUrl = fields.find(_._1 == "next_page").map(_._2) match
+              case Some(Json.Str(s)) => Some(s)
+              case _                 => None
+            // Zendesk also emits `end_of_stream: true` on the terminal page; both signals
+            // line up. We use `next_page` as the canonical "more pages" indicator.
             ZIO.succeed(
               Page(
                 records    = records,
-                maxUpdated = if updatedAts.isEmpty then None else Some(updatedAts.max),
                 minUpdated = if updatedAts.isEmpty then None else Some(updatedAts.min),
                 nextUrl    = nextUrl
               )
@@ -111,57 +101,170 @@ object Zendesk:
         }
     }
 
-  // ---- generic cursor connector ------------------------------------------------------------
+  /** Parser for standard `/api/v2/<resource>` envelope (with `links.next` cursor). */
+  def parseStandardPage(resource: String): Response => ZIO[Any, Throwable, Page] = resp =>
+    resp.body.asString.flatMap { body =>
+      ZIO
+        .fromEither(body.fromJson[Json])
+        .mapError(e => new RuntimeException(s"json parse: $e"))
+        .flatMap {
+          case Json.Obj(fields) =>
+            val records = fields.find(_._1 == resource).map(_._2) match
+              case Some(Json.Arr(items)) => items.toList
+              case _                     => Nil
+            val updatedAts = recordUpdatedAts(records)
+            val nextUrl = fields.find(_._1 == "links").map(_._2) match
+              case Some(Json.Obj(links)) =>
+                links.find(_._1 == "next").map(_._2) match
+                  case Some(Json.Str(s)) => Some(s)
+                  case _                 => None
+              case _ => None
+            ZIO.succeed(
+              Page(
+                records    = records,
+                minUpdated = if updatedAts.isEmpty then None else Some(updatedAts.min),
+                nextUrl    = nextUrl
+              )
+            )
+          case _ => ZIO.fail(new RuntimeException("expected JSON object"))
+        }
+    }
+
+  private def recordUpdatedAts(records: List[Json]): List[String] = records.flatMap {
+    case Json.Obj(rec) =>
+      rec.find(_._1 == "updated_at").map(_._2) match
+        case Some(Json.Str(s)) => Some(s)
+        case _                 => None
+    case _ => None
+  }
+
+  // ---- window helpers ----------------------------------------------------------------------
+
+  /** Generate non-overlapping daily windows covering `[from, to)`. Last window may be partial. */
+  def dailyWindows(from: Long, to: Long): List[Window] =
+    if from >= to then Nil
+    else
+      val SecondsPerDay = 86400L
+      LazyList
+        .iterate(from)(_ + SecondsPerDay)
+        .takeWhile(_ < to)
+        .map(start => Window(start, math.min(start + SecondsPerDay, to)))
+        .toList
+
+  /** ISO-8601 string from unix seconds, UTC. */
+  private def toIso(unixSecond: Long): String =
+    OffsetDateTime.ofInstant(Instant.ofEpochSecond(unixSecond), ZoneOffset.UTC).toString
+
+  // ---- connector builders ------------------------------------------------------------------
 
   /**
-   * Build a Zendesk connector for any endpoint that fits the standard pattern:
-   * `sort=-updated_at` initial request, `links.next` cursor pagination, records under a
-   * top-level array key.
+   * Slice-based incremental connector for resources that support
+   * `/api/v2/incremental/<resource>?start_time=X&end_time=Y`. Server filters to the window;
+   * client paginates via response `next_page` until null. Slices are daily; `parallelism`
+   * controls concurrent slice fetches (good for backfill).
    */
-  def cursorConnector(
+  def incrementalConnector(
       creds: Creds,
       streamId: String,
       streamVersion: String,
-      endpointPath: String,
-      recordsKey: String
-  ): Connector[State, Client, Throwable] =
-    HttpExtract[State]
-      .request(_ =>
+      resource: String,
+      from: Long       = Instant.parse("2020-01-01T00:00:00Z").getEpochSecond,
+      parallelism: Int = 4
+  ): SlicedConnector[Window, State, Client, Throwable] =
+    HttpSlice[Window, State]
+      .slices { state =>
+        val to = Instant.now().getEpochSecond
+        ZStream
+          .fromIterable(dailyWindows(from, to))
+          .filterNot(w => state.done.contains(w))
+      }
+      .request { (slice, _) =>
         Request.get(
-          URL.decode(s"${creds.baseUrl}$endpointPath?page%5Bsize%5D=100&sort=-updated_at").toOption.get
+          URL
+            .decode(
+              s"${creds.baseUrl}/incremental/$resource?start_time=${slice.start}&end_time=${slice.end}"
+            )
+            .toOption
+            .get
         )
-      )
-      .parse(parsePage(recordsKey))
-      .records(p => Chunk.fromIterable(p.records.map(_.toJson)))
-      .nextRequest { (_, page) =>
-        // TODO incremental-stop: ideally, when `sort=-updated_at` and the oldest record on
-        // the page is at-or-before the PREVIOUS run's cursor, we should stop pagination —
-        // we've crossed into already-seen territory. Today the framework's `advance` runs
-        // before `nextRequest` and is pure (`(S, P) => S`, no env access), so there's no
-        // clean way to read "the cursor at run start" from inside `nextRequest`. Without
-        // the stop, every run pages through Zendesk's full history. Cursor still tracks
-        // and state still persists; just not as efficient as the Python original.
+      }
+      .parse(parseIncrementalPage(resource))
+      .records(page => Chunk.fromIterable(page.records.map(_.toJson)))
+      .nextRequest { (_, _, page) =>
         page.nextUrl.flatMap(url => URL.decode(url).toOption.map(Request.get(_)))
       }
-      .advance { (state, page) =>
-        page.maxUpdated.fold(state)(u => if u > state.cursor then state.copy(cursor = u) else state)
+      .advance { (state, slice, page) =>
+        // /incremental: terminal when next_page is null. Server already filtered the
+        // records to the window; nothing to do client-side.
+        if page.nextUrl.isEmpty then state.copy(done = state.done + slice) else state
       }
       .basicAuth(creds.username, creds.password)
       .header(Header.ContentType(MediaType.application.json))
-      .toConnector(streamId, streamVersion)
+      .parallelism(parallelism)
+      .toSlicedConnector(streamId, streamVersion)
+
+  /**
+   * Slice-based connector for resources WITHOUT `/incremental` support. Standard endpoint
+   * with `sort=-updated_at` (descending); client paginates via `links.next` and stops when
+   * the oldest record on the page predates `slice.start`. One slice per run by default
+   * (`parallelism=1`) to avoid over-fetching duplicate top records on parallel slices.
+   *
+   * Records emitted include some "leakage" on the terminal page: records older than
+   * `slice.start` on the last page are emitted (we don't have slice context inside the
+   * `records` callback). Downstream dedup handles it. For tighter emit control, the
+   * framework would need a `(Slice, P) => Chunk[String]` records signature — TODO.
+   */
+  def slicedCursorConnector(
+      creds: Creds,
+      streamId: String,
+      streamVersion: String,
+      resource: String,
+      from: Long = Instant.parse("2020-01-01T00:00:00Z").getEpochSecond
+  ): SlicedConnector[Window, State, Client, Throwable] =
+    HttpSlice[Window, State]
+      .slices { state =>
+        val to = Instant.now().getEpochSecond
+        // One big slice covering the not-yet-done range. Done set captures completed
+        // single-slice runs; resume picks up where the last run left off.
+        val doneEnd = state.done.toList.map(_.end).maxOption.getOrElse(from)
+        if doneEnd < to then ZStream(Window(doneEnd, to))
+        else ZStream.empty
+      }
+      .request { (_, _) =>
+        Request.get(
+          URL.decode(s"${creds.baseUrl}/$resource?sort=-updated_at&page%5Bsize%5D=100").toOption.get
+        )
+      }
+      .parse(parseStandardPage(resource))
+      .records(page => Chunk.fromIterable(page.records.map(_.toJson)))
+      .nextRequest { (slice, _, page) =>
+        // Stop when we've descended past slice.start — already-seen territory.
+        val crossed = page.minUpdated.exists(_ < toIso(slice.start))
+        if crossed then None
+        else page.nextUrl.flatMap(url => URL.decode(url).toOption.map(Request.get(_)))
+      }
+      .advance { (state, slice, page) =>
+        // Terminal when nextUrl is null OR oldest on page predates slice.start.
+        val crossed  = page.minUpdated.exists(_ < toIso(slice.start))
+        val terminal = page.nextUrl.isEmpty || crossed
+        if terminal then state.copy(done = state.done + slice) else state
+      }
+      .basicAuth(creds.username, creds.password)
+      .header(Header.ContentType(MediaType.application.json))
+      .parallelism(1)
+      .toSlicedConnector(streamId, streamVersion)
 
   // ---- specific streams --------------------------------------------------------------------
 
-  def tickets(creds: Creds): Connector[State, Client, Throwable] =
-    cursorConnector(creds, "zendesk-tickets", "0.1.0", "/tickets", "tickets")
+  /** Tickets via `/api/v2/incremental/tickets`. Daily-window slices, parallel backfill. */
+  def tickets(creds: Creds): SlicedConnector[Window, State, Client, Throwable] =
+    incrementalConnector(creds, "zendesk-tickets", "0.1.0", "tickets")
 
-  def ticketMetrics(creds: Creds): Connector[State, Client, Throwable] =
-    cursorConnector(creds, "zendesk-ticket-metrics", "0.1.0", "/ticket_metrics", "ticket_metrics")
+  /** Ticket metrics via `/api/v2/ticket_metrics` (no /incremental). Single-slice + cursor stop. */
+  def ticketMetrics(creds: Creds): SlicedConnector[Window, State, Client, Throwable] =
+    slicedCursorConnector(creds, "zendesk-ticket-metrics", "0.1.0", "ticket_metrics")
 
-/**
- * Runtime registry. Each entry is a fully-provided ZIO that runs one stream end-to-end
- * (connector + Exlo.run + Client + DestinationFactory). `EXLO_STREAM` selects.
- */
+/** Runtime registry. Each entry runs one stream end-to-end via Exlo.run + provided env. */
 object ZendeskStreams:
 
   def make(creds: Zendesk.Creds): StreamRegistry = new StreamRegistry:
@@ -170,25 +273,23 @@ object ZendeskStreams:
       "ticket_metrics" -> runWith(Zendesk.ticketMetrics(creds))
     )
 
-  /** Wire one stream's connector to a SinkConfig (env) + Client (default) + Destination (env). */
   private def runWith(
-      connector: Connector[Zendesk.State, Client, Throwable]
+      sliced: SlicedConnector[Zendesk.Window, Zendesk.State, Client, Throwable]
   ): ZIO[Any, Throwable, Unit] =
     for
       sinkCfg <- SinkConfig.fromEnv
       _ <- Exlo
-             .run(connector, Zendesk.State(""), sinkCfg)
+             .run(sliced.toConnector, Zendesk.State.zero, sinkCfg)
              .provide(
                Client.default,
-               DestinationFactory.layer[Zendesk.State](connector.id)
+               DestinationFactory.layer[Zendesk.State](sliced.id)
              )
     yield ()
 
 /**
  * Single entry point — reads creds + `EXLO_STREAM` from env, dispatches via the registry.
- *
- * One Docker image, one main class, one container CMD. Each Argo Workflow Job sets a
- * different `EXLO_STREAM` (and matching `EXLO_TABLE_NAME`) to run a different stream.
+ * One Docker image per source. Argo Workflow Job sets `EXLO_STREAM` (and matching
+ * `EXLO_TABLE_NAME`) per stream to run.
  */
 object ZendeskApp extends ZIOAppDefault:
   def run =
