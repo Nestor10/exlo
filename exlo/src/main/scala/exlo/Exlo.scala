@@ -1,7 +1,7 @@
 package exlo
 
 import exlo.domain.{Connector, ExloError}
-import exlo.runtime.{Destination, ExloState, Sink, SinkConfig}
+import exlo.runtime.{Destination, ExloState, RunContext, Sink, SinkConfig}
 import zio.*
 
 /**
@@ -41,12 +41,14 @@ object Exlo:
 
     for
       syncId <- Random.nextUUID.map(_.toString)
-      _ <- ZIO.logAnnotate("sync_id", syncId) {
-             ZIO.logAnnotate("connector", connector.id) {
-               ZIO.logAnnotate("version", connector.version) {
-                 ZIO.logInfo("starting connector run") *>
-                   core.tapErrorCause(c => ZIO.logErrorCause("connector run failed", c)) *>
-                   ZIO.logInfo("connector run completed")
+      _ <- RunContext.withRun(syncId, connector.id, connector.version) {
+             ZIO.logAnnotate("sync_id", syncId) {
+               ZIO.logAnnotate("connector", connector.id) {
+                 ZIO.logAnnotate("version", connector.version) {
+                   ZIO.logInfo("starting connector run") *>
+                     core.tapErrorCause(c => ZIO.logErrorCause("connector run failed", c)) *>
+                     ZIO.logInfo("connector run completed")
+                 }
                }
              }
            }

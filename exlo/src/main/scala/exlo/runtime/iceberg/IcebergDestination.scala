@@ -1,7 +1,7 @@
 package exlo.runtime.iceberg
 
 import exlo.domain.ExloError
-import exlo.runtime.Destination
+import exlo.runtime.{Destination, RunContext}
 import org.apache.iceberg.*
 import org.apache.iceberg.catalog.{Catalog, TableIdentifier}
 import org.apache.iceberg.data.GenericRecord
@@ -12,6 +12,7 @@ import org.apache.iceberg.types.Types
 import zio.*
 import zio.json.JsonCodec
 
+import java.time.{OffsetDateTime, ZoneOffset}
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
@@ -42,10 +43,14 @@ final class IcebergDestination[S: JsonCodec](
   def writeRecords(records: Chunk[String]): IO[ExloError, Unit] =
     if records.isEmpty then ZIO.unit
     else
-      ZIO
-        .attempt(writeOneParquetFile(table, records))
-        .flatMap(file => pending.update(_ :+ file))
-        .mapError(t => ExloError.StorageError("iceberg writeRecords failed", t))
+      RunContext.snapshot.flatMap { case (syncId, connectorId, connectorVersion) =>
+        ZIO
+          .attemptBlocking(
+            writeOneParquetFile(table, records, syncId, connectorId, connectorVersion)
+          )
+          .flatMap(file => pending.update(_ :+ file))
+          .mapError(t => ExloError.StorageError("iceberg writeRecords failed", t))
+      }
 
   def commit(state: S): IO[ExloError, Unit] =
     pending.getAndSet(Nil).flatMap { files =>
@@ -76,9 +81,24 @@ final class IcebergDestination[S: JsonCodec](
 
 object IcebergDestination:
 
-  /** Schema: a single `payload` string column. Records are opaque to the framework. */
+  /**
+   * Schema: connector payload + framework-managed operational metadata.
+   *
+   *   - `payload`: opaque connector record (typically JSON-stringified).
+   *   - `exlo_recorded_at`: when the framework staged this batch into Iceberg.
+   *   - `exlo_sync_id`: per-run UUID, ties rows to log lines tagged with `sync_id`.
+   *   - `exlo_connector`: connector id (e.g. `pokeapi-kalos`).
+   *   - `exlo_connector_version`: connector's semver — useful for debugging behavior
+   *     differences across deploys.
+   *
+   * Field IDs are stable; adding new fields means appending with a higher ID.
+   */
   val schema: Schema = new Schema(
-    Types.NestedField.required(1, "payload", Types.StringType.get())
+    Types.NestedField.required(1, "payload",                Types.StringType.get()),
+    Types.NestedField.required(2, "exlo_recorded_at",       Types.TimestampType.withZone()),
+    Types.NestedField.required(3, "exlo_sync_id",           Types.StringType.get()),
+    Types.NestedField.required(4, "exlo_connector",         Types.StringType.get()),
+    Types.NestedField.required(5, "exlo_connector_version", Types.StringType.get())
   )
 
   val partitionSpec: PartitionSpec = PartitionSpec.unpartitioned()
@@ -107,8 +127,20 @@ object IcebergDestination:
   def fromTable[S: JsonCodec](table: Table): UIO[IcebergDestination[S]] =
     Ref.make(List.empty[DataFile]).map(new IcebergDestination[S](table, _))
 
-  /** Write a single Parquet file against the table from a chunk of records. */
-  private def writeOneParquetFile(table: Table, records: Chunk[String]): DataFile =
+  /**
+   * Write a single Parquet file against the table. All records in the batch share one
+   * `exlo_recorded_at` timestamp (the moment the batch was staged) and the run-context
+   * fields (sync_id, connector, version).
+   */
+  private def writeOneParquetFile(
+      table: Table,
+      records: Chunk[String],
+      syncId: String,
+      connectorId: String,
+      connectorVersion: String
+  ): DataFile =
+    val recordedAt = OffsetDateTime.now(ZoneOffset.UTC)
+
     val outFile = table
       .io()
       .newOutputFile(
@@ -129,7 +161,11 @@ object IcebergDestination:
     try
       records.foreach { r =>
         val gr = GenericRecord.create(table.schema())
-        gr.setField("payload", r)
+        gr.setField("payload",                r)
+        gr.setField("exlo_recorded_at",       recordedAt)
+        gr.setField("exlo_sync_id",           syncId)
+        gr.setField("exlo_connector",         connectorId)
+        gr.setField("exlo_connector_version", connectorVersion)
         writer.write(gr)
       }
     finally writer.close()

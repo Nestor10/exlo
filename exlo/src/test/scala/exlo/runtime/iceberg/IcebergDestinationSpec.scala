@@ -1,7 +1,11 @@
 package exlo.runtime.iceberg
 
+import exlo.runtime.RunContext
 import org.apache.hadoop.conf.Configuration
+import org.apache.iceberg.data.Record
+import org.apache.iceberg.data.parquet.GenericParquetReaders
 import org.apache.iceberg.hadoop.HadoopTables
+import org.apache.iceberg.parquet.Parquet
 import org.apache.iceberg.{PartitionSpec, Table}
 import zio.*
 import zio.json.*
@@ -115,6 +119,44 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
       yield assertTrue(
         snapshots.length == 2,
         states == List(Some(TestState("c1", 1)), Some(TestState("c2", 2)))
+      )
+    },
+    test("records carry framework-managed metadata columns (sync_id, connector, version, recorded_at)") {
+      for
+        path  <- ZIO.service[Path]
+        table <- freshTable(path, "tbl-metadata")
+        dest  <- IcebergDestination.fromTable[TestState](table)
+        // RunContext sets the FiberRefs that IcebergDestination reads when stamping records.
+        _ <- RunContext.withRun(
+               syncIdValue           = "test-sync-id-abc",
+               connectorIdValue      = "metadata-test",
+               connectorVersionValue = "9.9.9"
+             ) {
+               dest.writeRecords(Chunk("hello-world")) *> dest.commit(TestState("c1", 1))
+             }
+        _ <- ZIO.attemptBlocking(table.refresh())
+        records <- ZIO.attemptBlocking[List[Record]] {
+          // Read all data files for the table, project the full schema, return raw records.
+          val task = table.newScan().planFiles().iterator().next()
+          val inputFile = table.io().newInputFile(task.file().location())
+          val reader = Parquet
+            .read(inputFile)
+            .project(table.schema())
+            .createReaderFunc((fileSchema: org.apache.parquet.schema.MessageType) =>
+              GenericParquetReaders.buildReader(table.schema(), fileSchema)
+            )
+            .build()
+          try reader.iterator().asScala.map(_.asInstanceOf[Record]).toList
+          finally reader.close()
+        }
+        record: Record = records.head
+      yield assertTrue(
+        records.length == 1,
+        record.getField("payload")                == "hello-world",
+        record.getField("exlo_sync_id")           == "test-sync-id-abc",
+        record.getField("exlo_connector")         == "metadata-test",
+        record.getField("exlo_connector_version") == "9.9.9",
+        record.getField("exlo_recorded_at") != null
       )
     },
     test("commit with no staged records still advances state (state-only commit)") {
