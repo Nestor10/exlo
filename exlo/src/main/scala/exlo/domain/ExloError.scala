@@ -1,55 +1,29 @@
 package exlo.domain
 
-/**
- * Error types for EXLO framework operations.
- *
- * Users can extend this with their own error types if needed.
- */
-sealed trait ExloError extends Throwable
+sealed abstract class ExloError(message: String, cause: Throwable | Null)
+    extends Exception(message, cause)
 
 object ExloError:
 
-  /**
-   * Error from external API calls.
-   *
-   * @param status
-   *   HTTP status code
-   * @param message
-   *   Error message from API
-   */
-  case class ApiError(status: Int, message: String) extends ExloError
+  final case class StorageError(message: String, cause: Throwable)
+      extends ExloError(message, cause)
+
+  final case class StateError(message: String, cause: Throwable)
+      extends ExloError(message, cause)
+
+  final case class ConnectorFailure(message: String, cause: Throwable | Null = null)
+      extends ExloError(message, cause)
 
   /**
-   * Error reading state from Iceberg.
-   *
-   * @param cause
-   *   Underlying exception
+   * The starting snapshot for an incremental scan is no longer an ancestor of the table's
+   * current snapshot — typically because `expire_snapshots` ran past it. This is not
+   * recoverable without operator action: the child connector cannot continue contiguous
+   * ingestion. Surfaced loudly to the orchestration layer; manual state reset and
+   * backfill required.
    */
-  case class StateReadError(cause: Throwable) extends ExloError
-
-  /**
-   * Error writing to Iceberg (records or state).
-   *
-   * @param cause
-   *   Underlying exception
-   */
-  case class IcebergWriteError(cause: Throwable) extends ExloError
-
-  /**
-   * Configuration error (invalid or missing config).
-   *
-   * @param message
-   *   Description of configuration issue
-   */
-  case class ConfigurationError(message: String) extends ExloError
-
-  /**
-   * Error from user's connector extraction logic.
-   *
-   * @param message
-   *   Description of the connector error
-   * @param cause
-   *   Underlying exception from user code
-   */
-  case class ConnectorError(message: String, cause: Throwable) extends ExloError
-
+  final case class SnapshotExpired(snapshotId: Long, cause: Throwable)
+      extends ExloError(
+        s"snapshot $snapshotId is no longer an ancestor of the current snapshot — " +
+          "expired by table maintenance. Manual state reset and backfill required.",
+        cause
+      )
