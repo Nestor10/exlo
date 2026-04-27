@@ -26,7 +26,11 @@ trait StreamRegistry:
 
 object StreamRegistry:
 
-  /** Read `EXLO_STREAM` from env, dispatch to the matching entry, fail loudly on miss. */
+  /**
+   * Read `EXLO_STREAM` from env, dispatch to the matching entry, fail loudly on miss. The
+   * selected name is also bound to `RunContext.streamName` for the duration of the run, so
+   * destinations can stamp records with the stream they originated from.
+   */
   def runSelected(reg: StreamRegistry): ZIO[Any, Throwable, Unit] =
     for
       name <- ZIO.config(Config.string("stream").nested("exlo"))
@@ -38,5 +42,5 @@ object StreamRegistry:
                           reg.streams.keys.toList.sorted.mkString(", ")
                       )
                     )
-      _ <- runnable
+      _ <- RunContext.streamName.locally(name)(runnable)
     yield ()

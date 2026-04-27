@@ -81,6 +81,16 @@ object HttpExtract:
     def retry(s: Schedule[Any, Any, Any]): ParsedBuilder[S, P, RecSet, AdvSet] = withCfg(cfg.withRetry(s))
     def retryOnStatus(p: Status => Boolean): ParsedBuilder[S, P, RecSet, AdvSet] = withCfg(cfg.withRetryOnStatus(p))
 
+    /**
+     * OAuth 2 — `Authorization: Bearer <token>` injected per request, with token
+     * acquisition + refresh handled automatically by [[TokenManager]]. Pick the flow
+     * that matches your provider:
+     *   - [[OAuthFlow.ClientCredentials]] for M2M
+     *   - [[OAuthFlow.RefreshToken]] for user-delegated APIs (Google, GitHub, etc.)
+     *   - [[OAuthFlow.Password]] for legacy systems still using ROPC
+     */
+    def oauth(flow: OAuthFlow): ParsedBuilder[S, P, RecSet, AdvSet] = withCfg(cfg.withOAuth(flow))
+
   /** `.toConnector` available when both `records` and `advance` are set. */
   extension [S, P](b: ParsedBuilder[S, P, Provided, Provided])
     def toConnector(id: String, version: String)(using Tag[S]): Connector[S, Client, Throwable] =
@@ -96,28 +106,31 @@ object HttpExtract:
         final case class More(req: Request) extends Step
         case object Done                   extends Step
 
-        // Sequential walk. Each iteration: read state, fetch, parse, emit records,
-        // advance state. emit-then-update ordering captures the correct watermark
-        // (post-emit, the watermark covers exactly the records just enqueued).
-        ZStream.unfoldZIO[Client & ExloState[S], Throwable, Unit, Step](Start) {
-          case Done => ZIO.succeed(None)
-          case step =>
-            for
-              state <- ExloState.current[S]
-              req = step match
-                      case Start     => initial(state)
-                      case More(r)   => r
-                      case Done      => throw new MatchError(step) // unreachable
-              resp <- HttpExec.execute(req, b.cfg)
-              page <- parse(resp)
-              recs = records(page)
-              _ <- ExloState.emit[S](recs)
-              _ <- ExloState.update[S](s => advance(s, page))
-              newState <- ExloState.current[S]
-              nextStep = maybeNext
-                           .flatMap(_(newState, page).map(More(_)))
-                           .getOrElse(Done)
-            yield Some(((), nextStep))
+        // Build a TokenManager once per connector run (if oauth was configured); it caches
+        // the access token + handles refresh. Inherited by all unfold iterations via closure.
+        ZStream.unwrap {
+          ZIO.foreach(b.cfg.oauthFlow)(TokenManager.make).map { tm =>
+            ZStream.unfoldZIO[Client & ExloState[S], Throwable, Unit, Step](Start) {
+              case Done => ZIO.succeed(None)
+              case step =>
+                for
+                  state <- ExloState.current[S]
+                  req = step match
+                          case Start     => initial(state)
+                          case More(r)   => r
+                          case Done      => throw new MatchError(step) // unreachable
+                  resp <- HttpExec.execute(req, b.cfg, tm)
+                  page <- parse(resp)
+                  recs = records(page)
+                  _ <- ExloState.emit[S](recs)
+                  _ <- ExloState.update[S](s => advance(s, page))
+                  newState <- ExloState.current[S]
+                  nextStep = maybeNext
+                               .flatMap(_(newState, page).map(More(_)))
+                               .getOrElse(Done)
+                yield Some(((), nextStep))
+            }
+          }
         }
       }
 
@@ -148,6 +161,7 @@ object HttpExtract:
     def basicAuth(u: String, p: String): FullPullParsed[P, RecSet]     = withCfg(cfg.addHeader(Header.Authorization.Basic(u, p)))
     def retry(s: Schedule[Any, Any, Any]): FullPullParsed[P, RecSet]   = withCfg(cfg.withRetry(s))
     def retryOnStatus(p: Status => Boolean): FullPullParsed[P, RecSet] = withCfg(cfg.withRetryOnStatus(p))
+    def oauth(flow: OAuthFlow): FullPullParsed[P, RecSet]              = withCfg(cfg.withOAuth(flow))
 
   extension [P](b: FullPullParsed[P, Provided])
     def toConnector(id: String, version: String): Connector[Unit, Client, Throwable] =
@@ -156,14 +170,16 @@ object HttpExtract:
         val parse   = b.parseFn
         val records = b.recordsFn.get
 
-        ZStream.fromZIO {
-          for
-            resp <- HttpExec.execute(req(), b.cfg)
-            page <- parse(resp)
-            _    <- ExloState.emit[Unit](records(page))
-            // No state to advance — write a no-op state to mark "run completed". The
-            // watermark gates this on the records being durable.
-            _ <- ExloState.update[Unit](_ => ())
-          yield ()
+        ZStream.unwrap {
+          ZIO.foreach(b.cfg.oauthFlow)(TokenManager.make).map { tm =>
+            ZStream.fromZIO {
+              for
+                resp <- HttpExec.execute(req(), b.cfg, tm)
+                page <- parse(resp)
+                _    <- ExloState.emit[Unit](records(page))
+                _    <- ExloState.update[Unit](_ => ())
+              yield ()
+            }
+          }
         }
       }

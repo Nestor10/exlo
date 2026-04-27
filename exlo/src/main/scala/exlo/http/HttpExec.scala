@@ -16,7 +16,8 @@ import zio.http.*
 private[http] final case class HttpExecConfig(
     headers: Chunk[Header] = Chunk.empty,
     retrySchedule: Option[Schedule[Any, Any, Any]] = None,
-    retryOnStatus: Option[Status => Boolean] = None
+    retryOnStatus: Option[Status => Boolean] = None,
+    oauthFlow: Option[OAuthFlow] = None
 ):
   def addHeader(h: Header): HttpExecConfig = copy(headers = headers :+ h)
 
@@ -26,18 +27,33 @@ private[http] final case class HttpExecConfig(
   def withRetryOnStatus(p: Status => Boolean): HttpExecConfig =
     copy(retryOnStatus = Some(p))
 
+  def withOAuth(flow: OAuthFlow): HttpExecConfig =
+    copy(oauthFlow = Some(flow))
+
 private[http] object HttpExec:
 
   /** Marker error used to lift a "retryable" response into the failure channel for `retry`. */
   private final case class RetryableResponse(response: Response) extends Throwable
 
-  /** Execute a single request with the given config: inject headers, retry on failure. */
-  def execute(req: Request, cfg: HttpExecConfig): ZIO[Client, Throwable, Response] =
-    val withHeaders = cfg.headers.foldLeft(req)((r, h) => r.addHeader(h))
+  /**
+   * Execute a single request with the given config and an optional `TokenManager`.
+   * If `tokenManager` is set, an `Authorization: Bearer <fresh access token>` header is
+   * added per request — `tokenManager.token` handles caching and refresh.
+   */
+  def execute(
+      req: Request,
+      cfg: HttpExecConfig,
+      tokenManager: Option[TokenManager]
+  ): ZIO[Client, Throwable, Response] =
+    val withStaticHeaders = cfg.headers.foldLeft(req)((r, h) => r.addHeader(h))
+
+    val withAuth: ZIO[Client, Throwable, Request] = tokenManager match
+      case Some(tm) => tm.token.map(t => withStaticHeaders.addHeader(Header.Authorization.Bearer(t)))
+      case None     => ZIO.succeed(withStaticHeaders)
 
     // Lift retryable responses into failures so the retry schedule covers them too.
     val sendOnce: ZIO[Client, Throwable, Response] =
-      ZClient.batched(withHeaders).flatMap { resp =>
+      withAuth.flatMap(ZClient.batched).flatMap { resp =>
         cfg.retryOnStatus match
           case Some(p) if p(resp.status) => ZIO.fail(RetryableResponse(resp))
           case _                         => ZIO.succeed(resp)

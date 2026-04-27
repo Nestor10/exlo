@@ -43,10 +43,10 @@ final class IcebergDestination[S: JsonCodec](
   def writeRecords(records: Chunk[String]): IO[ExloError, Unit] =
     if records.isEmpty then ZIO.unit
     else
-      RunContext.snapshot.flatMap { case (syncId, connectorId, connectorVersion) =>
+      RunContext.snapshot.flatMap { case (syncId, connectorId, connectorVersion, streamName) =>
         ZIO
           .attemptBlocking(
-            writeOneParquetFile(table, records, syncId, connectorId, connectorVersion)
+            writeOneParquetFile(table, records, syncId, connectorId, connectorVersion, streamName)
           )
           .flatMap(file => pending.update(_ :+ file))
           .mapError(t => ExloError.StorageError("iceberg writeRecords failed", t))
@@ -87,9 +87,10 @@ object IcebergDestination:
    *   - `payload`: opaque connector record (typically JSON-stringified).
    *   - `exlo_recorded_at`: when the framework staged this batch into Iceberg.
    *   - `exlo_sync_id`: per-run UUID, ties rows to log lines tagged with `sync_id`.
-   *   - `exlo_connector`: connector id (e.g. `pokeapi-kalos`).
-   *   - `exlo_connector_version`: connector's semver — useful for debugging behavior
-   *     differences across deploys.
+   *   - `exlo_connector`: connector id / source (e.g. `zendesk`, `pokeapi-kalos`).
+   *   - `exlo_connector_version`: connector's semver.
+   *   - `exlo_stream`: stream name within a multi-stream connector (e.g. `tickets`,
+   *     `ticket_metrics`). Empty string for single-stream apps.
    *
    * Field IDs are stable; adding new fields means appending with a higher ID.
    */
@@ -98,7 +99,8 @@ object IcebergDestination:
     Types.NestedField.required(2, "exlo_recorded_at",       Types.TimestampType.withZone()),
     Types.NestedField.required(3, "exlo_sync_id",           Types.StringType.get()),
     Types.NestedField.required(4, "exlo_connector",         Types.StringType.get()),
-    Types.NestedField.required(5, "exlo_connector_version", Types.StringType.get())
+    Types.NestedField.required(5, "exlo_connector_version", Types.StringType.get()),
+    Types.NestedField.required(6, "exlo_stream",            Types.StringType.get())
   )
 
   val partitionSpec: PartitionSpec = PartitionSpec.unpartitioned()
@@ -137,7 +139,8 @@ object IcebergDestination:
       records: Chunk[String],
       syncId: String,
       connectorId: String,
-      connectorVersion: String
+      connectorVersion: String,
+      streamName: String
   ): DataFile =
     val recordedAt = OffsetDateTime.now(ZoneOffset.UTC)
 
@@ -166,6 +169,7 @@ object IcebergDestination:
         gr.setField("exlo_sync_id",           syncId)
         gr.setField("exlo_connector",         connectorId)
         gr.setField("exlo_connector_version", connectorVersion)
+        gr.setField("exlo_stream",            streamName)
         writer.write(gr)
       }
     finally writer.close()

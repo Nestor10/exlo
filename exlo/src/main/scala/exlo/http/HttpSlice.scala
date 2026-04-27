@@ -80,6 +80,7 @@ object HttpSlice:
     def basicAuth(u: String, p: String): Builder[Slice, S, P, RecSet, AdvSet]  = withCfg(cfg.addHeader(Header.Authorization.Basic(u, p)))
     def retry(s: Schedule[Any, Any, Any]): Builder[Slice, S, P, RecSet, AdvSet] = withCfg(cfg.withRetry(s))
     def retryOnStatus(p: Status => Boolean): Builder[Slice, S, P, RecSet, AdvSet] = withCfg(cfg.withRetryOnStatus(p))
+    def oauth(flow: OAuthFlow): Builder[Slice, S, P, RecSet, AdvSet]           = withCfg(cfg.withOAuth(flow))
 
   extension [Slice, S, P](b: Builder[Slice, S, P, Provided, Provided])
     def toSlicedConnector(id: String, version: String)(using
@@ -104,29 +105,35 @@ object HttpSlice:
 
         def extract(slice: Slice): ZStream[Client & ExloState[S], Throwable, Unit] =
           // Cursor walk within one slice. Records and state advances flow through ExloState;
-          // STM serializes concurrent slice fibers' state updates.
+          // STM serializes concurrent slice fibers' state updates. Each slice builds its own
+          // TokenManager (small token-endpoint overhead per slice; trade-off accepted to keep
+          // the code simple — parallel slices = a few extra initial fetches at run start).
           sealed trait Step
           case object Start                  extends Step
           final case class More(req: Request) extends Step
           case object Done                   extends Step
 
-          ZStream.unfoldZIO[Client & ExloState[S], Throwable, Unit, Step](Start) {
-            case Done => ZIO.succeed(None)
-            case step =>
-              for
-                state <- ExloState.current[S]
-                req = step match
-                        case Start     => request(slice, state)
-                        case More(r)   => r
-                        case Done      => throw new MatchError(step) // unreachable
-                resp <- HttpExec.execute(req, b.cfg)
-                page <- parse(resp)
-                recs = records(page)
-                _ <- ExloState.emit[S](recs)
-                _ <- ExloState.update[S](s => advance(s, slice, page))
-                newState <- ExloState.current[S]
-                nextStep = maybeNext
-                             .flatMap(_(slice, newState, page).map(More(_)))
-                             .getOrElse(Done)
-              yield Some(((), nextStep))
+          ZStream.unwrap {
+            ZIO.foreach(b.cfg.oauthFlow)(TokenManager.make).map { tm =>
+              ZStream.unfoldZIO[Client & ExloState[S], Throwable, Unit, Step](Start) {
+                case Done => ZIO.succeed(None)
+                case step =>
+                  for
+                    state <- ExloState.current[S]
+                    req = step match
+                            case Start     => request(slice, state)
+                            case More(r)   => r
+                            case Done      => throw new MatchError(step) // unreachable
+                    resp <- HttpExec.execute(req, b.cfg, tm)
+                    page <- parse(resp)
+                    recs = records(page)
+                    _ <- ExloState.emit[S](recs)
+                    _ <- ExloState.update[S](s => advance(s, slice, page))
+                    newState <- ExloState.current[S]
+                    nextStep = maybeNext
+                                 .flatMap(_(slice, newState, page).map(More(_)))
+                                 .getOrElse(Done)
+                  yield Some(((), nextStep))
+              }
+            }
           }

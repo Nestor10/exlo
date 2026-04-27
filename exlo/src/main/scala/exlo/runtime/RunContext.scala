@@ -23,9 +23,17 @@ object RunContext:
     Unsafe.unsafe(implicit u => FiberRef.unsafe.make("0.0.0"))
 
   /**
-   * Scope a connector run's context. Inside `zio`, all three FiberRefs hold the given
-   * values; on exit they revert. Forked fibers within `zio` inherit the values at
-   * fork time.
+   * Stream name within a multi-stream connector (e.g. `tickets`, `ticket_metrics`).
+   * Empty string for single-stream apps. Set by `StreamRegistry.runSelected` from
+   * `EXLO_STREAM`; left as `""` otherwise.
+   */
+  val streamName: FiberRef[String] =
+    Unsafe.unsafe(implicit u => FiberRef.unsafe.make(""))
+
+  /**
+   * Scope a connector run's context. Inside `zio`, the connector-identity FiberRefs hold
+   * the given values; on exit they revert. Forked fibers within `zio` inherit the values
+   * at fork time. Stream name is set separately by `StreamRegistry.runSelected`.
    */
   def withRun[R, E, A](
       syncIdValue: String,
@@ -38,10 +46,11 @@ object RunContext:
       }
     }
 
-  /** Snapshot of (syncId, connectorId, connectorVersion) — call from inside the run. */
-  val snapshot: UIO[(String, String, String)] =
+  /** Snapshot of (syncId, connectorId, connectorVersion, streamName). */
+  val snapshot: UIO[(String, String, String, String)] =
     for
-      s <- syncId.get
-      c <- connectorId.get
-      v <- connectorVersion.get
-    yield (s, c, v)
+      s  <- syncId.get
+      c  <- connectorId.get
+      v  <- connectorVersion.get
+      sn <- streamName.get
+    yield (s, c, v, sn)

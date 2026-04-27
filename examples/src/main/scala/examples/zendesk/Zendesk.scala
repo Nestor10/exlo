@@ -60,8 +60,17 @@ object Zendesk:
 
   // ---- shared response shape + parser ------------------------------------------------------
 
-  /** Generic Zendesk page envelope. */
-  final case class Page(records: List[Json], maxUpdated: Option[String], nextUrl: Option[String])
+  /**
+   * Generic Zendesk page envelope. Tracks both the newest (`maxUpdated`) and oldest
+   * (`minUpdated`) record on the page — newest advances the cursor, oldest determines
+   * when to stop pagination on incremental runs.
+   */
+  final case class Page(
+      records: List[Json],
+      maxUpdated: Option[String],
+      minUpdated: Option[String],
+      nextUrl: Option[String]
+  )
 
   /** Build a parser keyed by the records' top-level array key (e.g. `tickets`, `ticket_metrics`). */
   def parsePage(recordsKey: String): Response => ZIO[Any, Throwable, Page] = resp =>
@@ -94,6 +103,7 @@ object Zendesk:
               Page(
                 records    = records,
                 maxUpdated = if updatedAts.isEmpty then None else Some(updatedAts.max),
+                minUpdated = if updatedAts.isEmpty then None else Some(updatedAts.min),
                 nextUrl    = nextUrl
               )
             )
@@ -123,9 +133,16 @@ object Zendesk:
       )
       .parse(parsePage(recordsKey))
       .records(p => Chunk.fromIterable(p.records.map(_.toJson)))
-      .nextRequest((_, page) =>
+      .nextRequest { (_, page) =>
+        // TODO incremental-stop: ideally, when `sort=-updated_at` and the oldest record on
+        // the page is at-or-before the PREVIOUS run's cursor, we should stop pagination —
+        // we've crossed into already-seen territory. Today the framework's `advance` runs
+        // before `nextRequest` and is pure (`(S, P) => S`, no env access), so there's no
+        // clean way to read "the cursor at run start" from inside `nextRequest`. Without
+        // the stop, every run pages through Zendesk's full history. Cursor still tracks
+        // and state still persists; just not as efficient as the Python original.
         page.nextUrl.flatMap(url => URL.decode(url).toOption.map(Request.get(_)))
-      )
+      }
       .advance { (state, page) =>
         page.maxUpdated.fold(state)(u => if u > state.cursor then state.copy(cursor = u) else state)
       }
