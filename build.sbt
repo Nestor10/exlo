@@ -48,6 +48,8 @@ lazy val exlo = project
       "software.amazon.awssdk" % "dynamodb" % awsVersion,
       "software.amazon.awssdk" % "kms"      % awsVersion,
       "software.amazon.awssdk" % "sts"      % awsVersion,
+      "software.amazon.awssdk" % "sso"     % awsVersion,
+      "software.amazon.awssdk" % "ssooidc" % awsVersion,
 
       // Nessie catalog client
       "org.projectnessie.nessie" % "nessie-client" % nessieVersion,
