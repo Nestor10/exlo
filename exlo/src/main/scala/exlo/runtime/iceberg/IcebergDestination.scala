@@ -26,9 +26,8 @@ import scala.jdk.CollectionConverters.*
  *     only — no state in snapshot summary), then appends one row to the sidecar
  *     [[StateStore]] table. Crash between the two steps yields at-least-once duplicates
  *     in the data table; that is the contract.
- *   - `readState` queries [[StateStore]] for the latest checkpoint for this connector+stream.
- *     On cold start (no sidecar row) it checks the data table's current snapshot summary
- *     for the legacy `exlo.state` key and performs a one-shot bootstrap migration.
+ *   - `readState` queries [[StateStore]] for the latest checkpoint for this connector+stream;
+ *     returns `None` on cold start.
  *
  * Schema is fixed: one column `payload: STRING`. Records are opaque to the framework —
  * connector authors emit JSON strings, downstream queries cast and parse as needed.
@@ -90,41 +89,8 @@ final class IcebergDestination[S: JsonCodec](
     for
       connector <- RunContext.connectorId.get
       stream    <- RunContext.streamName.get
-      rowOpt    <- stateStore.readLatest(connector, stream).flatMap {
-                     case some @ Some(_) => ZIO.succeed(some)
-                     case None           => bootstrapMigrate(connector, stream)
-                   }
+      rowOpt    <- stateStore.readLatest(connector, stream)
     yield rowOpt.flatMap(row => summon[JsonCodec[S]].decoder.decodeJson(row.state).toOption)
-
-  /**
-   * One-shot bootstrap migration: if the sidecar has no row for this stream but the data
-   * table's current snapshot carries the legacy `exlo.state` summary key, hydrate one
-   * sidecar row from it and return it. After hydration the sidecar is authoritative and
-   * this path is never taken again.
-   */
-  private def bootstrapMigrate(connector: String, stream: String): IO[ExloError, Option[StateRow]] =
-    ZIO
-      .attemptBlocking {
-        table.refresh()
-        Option(table.currentSnapshot())
-          .flatMap(snap => Option(snap.summary().get(stateProperty)))
-      }
-      .mapError(t => ExloError.StorageError("iceberg bootstrap migration failed", t))
-      .flatMap {
-        case None => ZIO.succeed(None)
-        case Some(stateJson) =>
-          val row = StateRow(
-            syncId              = Ulid.generate(),
-            connector           = connector,
-            stream              = stream,
-            stateVersion        = 0L,
-            connectorConfigHash = "",
-            streamConfigHash    = "",
-            state               = stateJson,
-            committedAt         = Instant.now()
-          )
-          stateStore.append(row).as(Some(row))
-      }
 
 object IcebergDestination:
 
@@ -152,9 +118,6 @@ object IcebergDestination:
   )
 
   val partitionSpec: PartitionSpec = PartitionSpec.unpartitioned()
-
-  /** Snapshot summary property key — **read-only** in the bootstrap migration path. */
-  val stateProperty: String = "exlo.state"
 
   /** Load or create the destination's Iceberg table, then build the destination. */
   def make[S: JsonCodec](

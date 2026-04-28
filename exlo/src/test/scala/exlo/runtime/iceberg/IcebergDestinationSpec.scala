@@ -21,8 +21,7 @@ import scala.jdk.CollectionConverters.*
  * by path in the JVM, so reusing the same path within one process can serve stale data —
  * unique paths sidestep that). Cleanup via `ZIO.acquireRelease` is best-effort.
  *
- * State is now stored in the [[StateStore]] sidecar, not in snapshot summary properties.
- * Tests use [[StateStore.InMemory]] (no Iceberg I/O for state).
+ * State is stored in the [[StateStore]] sidecar; tests use [[StateStore.InMemory]].
  */
 object IcebergDestinationSpec extends ZIOSpecDefault:
 
@@ -222,30 +221,6 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
       yield assertTrue(
         snap == Some(TestState("just-state", 0)),
         snapshotCount == 0
-      )
-    },
-    test("bootstrap migration: reads legacy exlo.state from snapshot summary on first readState") {
-      // Simulate a table that was previously written with the old snapshot-summary approach.
-      for
-        path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl-bootstrap")
-        // Manually commit a snapshot carrying the old exlo.state property.
-        _ <- ZIO.attemptBlocking {
-               val append = table.newAppend()
-               append.set("exlo.state", """{"cursor":"old-cursor","count":42}""")
-               append.commit()
-             }
-        // Fresh state store (empty — simulates first run after upgrade).
-        stateStore <- StateStore.InMemory.make
-        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
-        resumed <- RunContext.withRun("s", "c", "1.0") {
-                     RunContext.streamName.locally("st") { dest.readState }
-                   }
-        // After migration, sidecar should have a row.
-        sidecarRow <- stateStore.readLatest("c", "st")
-      yield assertTrue(
-        resumed == Some(TestState("old-cursor", 42)),
-        sidecarRow.isDefined
       )
     }
   ).provideLayerShared(tempDirLayer)
