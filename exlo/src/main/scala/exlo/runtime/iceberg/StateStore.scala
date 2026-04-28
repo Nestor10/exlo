@@ -94,8 +94,8 @@ object StateStore:
    * Live implementation backed by a real Iceberg catalog.
    *
    * Sidecar tables are auto-created on first `append` (namespace `exlo_state` is also
-   * auto-created if absent). The `readLatest` method never writes; if no table exists it
-   * returns `None` immediately — the bootstrap migration is the caller's responsibility.
+   * auto-created if absent). The `readLatest` method never writes; if no sidecar table
+   * exists yet, returns `None`.
    */
   final class Live(catalog: Catalog) extends StateStore:
 

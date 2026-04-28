@@ -86,6 +86,10 @@ object HttpSlice:
     def toSlicedConnector(id: String, version: String)(using
         Tag[S]
     ): SlicedConnector[Slice, S, Client, Throwable] =
+      require(
+        "^[a-zA-Z0-9_]+$".r.matches(id),
+        s"Connector id '$id' contains invalid characters. Use alphanumerics and underscores only."
+      )
       val slicesFn  = b.slicesFn
       val request   = b.requestFn
       val parse     = b.parseFn

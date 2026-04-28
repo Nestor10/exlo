@@ -111,4 +111,4 @@ object GlanceConnector:
       }
       .parallelism(4)
       .bearer(token)
-      .toSlicedConnector("glance-broadcasts", "0.1.0")
+      .toSlicedConnector("glance_broadcasts", "0.1.0")

@@ -36,6 +36,15 @@ trait Connector[S, -R, +E <: Throwable]:
 
 object Connector:
 
+  private val validId = "^[a-zA-Z0-9_]+$".r
+
+  /** Throws [[IllegalArgumentException]] immediately if `id` is not alphanumeric+underscore. */
+  private def requireValidId(id: String): Unit =
+    require(
+      validId.matches(id),
+      s"Connector id '$id' contains invalid characters. Use alphanumerics and underscores only."
+    )
+
   /**
    * Construct a connector from an existing effect-stream. Useful when the stream is built
    * elsewhere (e.g. by a builder) or when the connector is small enough that defining a
@@ -45,6 +54,7 @@ object Connector:
       id: String,
       version: String
   )(stream: => ZStream[R & ExloState[S], E, Unit]): Connector[S, R, E] =
+    requireValidId(id)
     val (cid, cversion) = (id, version)
     new Connector[S, R, E]:
       def id: String                                       = cid

@@ -17,9 +17,6 @@ import java.time.{Instant, ZoneOffset}
  *   - `InMemory` — pure unit tests against the in-memory implementation; no I/O.
  *   - `Live`     — integration tests against a real [[HadoopCatalog]] over a local temp
  *                  directory, verifying Parquet write/read and sidecar table auto-creation.
- *
- * Bootstrap migration is tested in [[IcebergDestinationSpec]] (it lives in
- * `IcebergDestination.readState`, not inside `StateStore` itself).
  */
 object StateStoreSpec extends ZIOSpecDefault:
 

@@ -53,7 +53,7 @@ object OAuthSpec extends ZIOSpecDefault:
     .records(p => Chunk.fromIterable(p.records))
     .advance((s, _) => s)
     .oauth(flow)
-    .toConnector("oauth-test", "0.1.0")
+    .toConnector("oauth_test", "0.1.0")
 
   def spec = suite("OAuth")(
     test("ClientCredentials grant fetches a token and uses it as Bearer") {

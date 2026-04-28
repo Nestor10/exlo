@@ -41,7 +41,7 @@ object HttpExtractSpec extends ZIOSpecDefault:
       page.next.map(n => Request.get(URL.decode(s"http://test.invalid/items?page=$n").toOption.get))
     )
     .advance((state, page) => state.copy(page = page.next.getOrElse(state.page)))
-    .toConnector("test-cursor", "0.1.0")
+    .toConnector("test_cursor", "0.1.0")
 
   def spec = suite("HttpExtract")(
     test("walks all pages via nextRequest, accumulating records, advances state") {
