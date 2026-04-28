@@ -12,7 +12,7 @@ import org.apache.iceberg.types.Types
 import zio.*
 import zio.json.JsonCodec
 
-import java.time.{OffsetDateTime, ZoneOffset}
+import java.time.{Instant, OffsetDateTime, ZoneOffset}
 import java.util.UUID
 import scala.jdk.CollectionConverters.*
 
@@ -22,11 +22,13 @@ import scala.jdk.CollectionConverters.*
  *   - `writeRecords` writes a Parquet `DataFile` against the table (uncommitted) and
  *     appends to an in-memory pending list. Memory stays bounded — records flow out as
  *     Parquet files in S3/local FS as soon as they're staged.
- *   - `commit` does one Iceberg `AppendFiles` transaction: appends all pending DataFiles,
- *     sets the connector's serialized state as a snapshot property, commits. Atomic by
- *     Iceberg's own guarantee.
- *   - `readState` reads the latest snapshot's `exlo.state` property and decodes via
- *     the connector's `JsonCodec[S]`.
+ *   - `commit` does one Iceberg `AppendFiles` transaction on the data table (data files
+ *     only — no state in snapshot summary), then appends one row to the sidecar
+ *     [[StateStore]] table. Crash between the two steps yields at-least-once duplicates
+ *     in the data table; that is the contract.
+ *   - `readState` queries [[StateStore]] for the latest checkpoint for this connector+stream.
+ *     On cold start (no sidecar row) it checks the data table's current snapshot summary
+ *     for the legacy `exlo.state` key and performs a one-shot bootstrap migration.
  *
  * Schema is fixed: one column `payload: STRING`. Records are opaque to the framework —
  * connector authors emit JSON strings, downstream queries cast and parse as needed.
@@ -36,7 +38,8 @@ import scala.jdk.CollectionConverters.*
  */
 final class IcebergDestination[S: JsonCodec](
     table: Table,
-    pending: Ref[List[DataFile]]
+    pending: Ref[List[DataFile]],
+    stateStore: StateStore
 ) extends Destination[S]:
   import IcebergDestination.*
 
@@ -53,31 +56,75 @@ final class IcebergDestination[S: JsonCodec](
       }
 
   def commit(state: S): IO[ExloError, Unit] =
-    pending.getAndSet(Nil).flatMap { files =>
-      ZIO
-        .attempt {
-          val append = table.newAppend()
-          files.foreach(append.appendFile)
-          val stateJson = summon[JsonCodec[S]].encoder.encodeJson(state, None).toString
-          append.set(stateProperty, stateJson)
-          append.commit()
-        }
-        .mapError(t => ExloError.StorageError("iceberg commit failed", t))
-    }
+    for
+      files <- pending.getAndSet(Nil)
+      // 1. Commit data files to the data table (no state in snapshot summary).
+      _ <- ZIO.when(files.nonEmpty) {
+             ZIO
+               .attempt {
+                 val append = table.newAppend()
+                 files.foreach(append.appendFile)
+                 append.commit()
+               }
+               .mapError(t => ExloError.StorageError("iceberg commit failed", t))
+           }
+      // 2. Append state to sidecar.
+      // Crash between step 1 and step 2 → next run resumes from older state →
+      // duplicates in data table. At-least-once by design.
+      (syncId, connector, _, stream) <- RunContext.snapshot
+      stateJson = summon[JsonCodec[S]].encoder.encodeJson(state, None).toString
+      row = StateRow(
+              syncId              = syncId,
+              connector           = connector,
+              stream              = stream,
+              stateVersion        = 0L,
+              connectorConfigHash = "",
+              streamConfigHash    = "",
+              state               = stateJson,
+              committedAt         = Instant.now()
+            )
+      _ <- stateStore.append(row)
+    yield ()
 
   def readState: IO[ExloError, Option[S]] =
+    for
+      connector <- RunContext.connectorId.get
+      stream    <- RunContext.streamName.get
+      rowOpt    <- stateStore.readLatest(connector, stream).flatMap {
+                     case some @ Some(_) => ZIO.succeed(some)
+                     case None           => bootstrapMigrate(connector, stream)
+                   }
+    yield rowOpt.flatMap(row => summon[JsonCodec[S]].decoder.decodeJson(row.state).toOption)
+
+  /**
+   * One-shot bootstrap migration: if the sidecar has no row for this stream but the data
+   * table's current snapshot carries the legacy `exlo.state` summary key, hydrate one
+   * sidecar row from it and return it. After hydration the sidecar is authoritative and
+   * this path is never taken again.
+   */
+  private def bootstrapMigrate(connector: String, stream: String): IO[ExloError, Option[StateRow]] =
     ZIO
-      .attempt {
-        // Refresh first to pick up any catalog-level updates (e.g., a previous run committed
-        // from a different process).
+      .attemptBlocking {
         table.refresh()
-        Option(table.currentSnapshot()).flatMap { snap =>
-          Option(snap.summary().get(stateProperty)).flatMap { json =>
-            summon[JsonCodec[S]].decoder.decodeJson(json).toOption
-          }
-        }
+        Option(table.currentSnapshot())
+          .flatMap(snap => Option(snap.summary().get(stateProperty)))
       }
-      .mapError(t => ExloError.StorageError("iceberg readState failed", t))
+      .mapError(t => ExloError.StorageError("iceberg bootstrap migration failed", t))
+      .flatMap {
+        case None => ZIO.succeed(None)
+        case Some(stateJson) =>
+          val row = StateRow(
+            syncId              = Ulid.generate(),
+            connector           = connector,
+            stream              = stream,
+            stateVersion        = 0L,
+            connectorConfigHash = "",
+            streamConfigHash    = "",
+            state               = stateJson,
+            committedAt         = Instant.now()
+          )
+          stateStore.append(row).as(Some(row))
+      }
 
 object IcebergDestination:
 
@@ -106,13 +153,14 @@ object IcebergDestination:
 
   val partitionSpec: PartitionSpec = PartitionSpec.unpartitioned()
 
-  /** Snapshot summary property key holding the connector's JSON-encoded state. */
+  /** Snapshot summary property key — **read-only** in the bootstrap migration path. */
   val stateProperty: String = "exlo.state"
 
   /** Load or create the destination's Iceberg table, then build the destination. */
   def make[S: JsonCodec](
       catalog: Catalog,
-      tableIdentifier: TableIdentifier
+      tableIdentifier: TableIdentifier,
+      stateStore: StateStore
   ): Task[IcebergDestination[S]] =
     for
       table <- ZIO.attemptBlocking {
@@ -120,15 +168,15 @@ object IcebergDestination:
                  else catalog.createTable(tableIdentifier, schema, partitionSpec)
                }
       pending <- Ref.make(List.empty[DataFile])
-    yield new IcebergDestination[S](table, pending)
+    yield new IcebergDestination[S](table, pending, stateStore)
 
   /**
    * Build a destination over an already-loaded `Table`. Useful for tests that construct
    * the table via `HadoopTables` directly, or for code paths that want to manage the
    * `Catalog` lifecycle separately from the destination.
    */
-  def fromTable[S: JsonCodec](table: Table): UIO[IcebergDestination[S]] =
-    Ref.make(List.empty[DataFile]).map(new IcebergDestination[S](table, _))
+  def fromTable[S: JsonCodec](table: Table, stateStore: StateStore): UIO[IcebergDestination[S]] =
+    Ref.make(List.empty[DataFile]).map(new IcebergDestination[S](table, _, stateStore))
 
   /**
    * Write a single Parquet file against the table. All records in the batch share one

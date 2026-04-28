@@ -1,6 +1,6 @@
 package exlo.runtime
 
-import exlo.runtime.iceberg.{Catalogs, CatalogConfig, IcebergDestination, TableConfig}
+import exlo.runtime.iceberg.{Catalogs, CatalogConfig, IcebergDestination, StateStore, TableConfig}
 import zio.*
 import zio.json.JsonCodec
 
@@ -37,7 +37,8 @@ object DestinationFactory:
             tableConfig   <- TableConfig.fromEnv
             catalog       <- Catalogs.make(catalogConfig)
             table         <- Catalogs.loadOrCreateTable(catalog, tableConfig.namespace, tableConfig.name)
-            dest          <- IcebergDestination.fromTable[S](table)
+            stateStore    = new StateStore.Live(catalog)
+            dest          <- IcebergDestination.fromTable[S](table, stateStore)
           yield dest
         case other =>
           ZIO.fail(

@@ -20,6 +20,9 @@ import scala.jdk.CollectionConverters.*
  * Uses `HadoopTables` against a unique temp directory per test (Iceberg caches metadata
  * by path in the JVM, so reusing the same path within one process can serve stale data —
  * unique paths sidestep that). Cleanup via `ZIO.acquireRelease` is best-effort.
+ *
+ * State is now stored in the [[StateStore]] sidecar, not in snapshot summary properties.
+ * Tests use [[StateStore.InMemory]] (no Iceberg I/O for state).
  */
 object IcebergDestinationSpec extends ZIOSpecDefault:
 
@@ -58,74 +61,107 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
     }
 
   def spec = suite("IcebergDestination")(
-    test("commit lands records as a new snapshot AND state in snapshot summary properties") {
+    test("commit lands records as a new snapshot; state is in sidecar, NOT snapshot summary") {
       for
-        path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl1")
-        dest  <- IcebergDestination.fromTable[TestState](table)
-        _     <- dest.writeRecords(Chunk("rec-a", "rec-b", "rec-c"))
-        _     <- dest.commit(TestState(cursor = "after-batch-1", count = 3))
-        // Inspect the table directly to verify the commit shape.
-        _     <- ZIO.attemptBlocking(table.refresh())
-        snapshots = table.snapshots().asScala.toList
-        latest    = table.currentSnapshot()
-        stateJson = Option(latest).flatMap(s => Option(s.summary().get("exlo.state")))
-        decoded   = stateJson.flatMap(s => s.fromJson[TestState].toOption)
+        path       <- ZIO.service[Path]
+        table      <- freshTable(path, "tbl1")
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
+        _          <- dest.writeRecords(Chunk("rec-a", "rec-b", "rec-c"))
+        _ <- RunContext.withRun("sync-1", "test-connector", "1.0.0") {
+               RunContext.streamName.locally("my-stream") {
+                 dest.commit(TestState(cursor = "after-batch-1", count = 3))
+               }
+             }
+        // Inspect the Iceberg table — snapshot summary must NOT carry exlo.state.
+        _ <- ZIO.attemptBlocking(table.refresh())
+        snapshots   = table.snapshots().asScala.toList
+        latest      = table.currentSnapshot()
+        summaryState = Option(latest).flatMap(s => Option(s.summary().get("exlo.state")))
+        // But state should be in the sidecar.
+        sidecarRow <- stateStore.readLatest("test-connector", "my-stream")
       yield assertTrue(
         snapshots.length == 1,
-        decoded == Some(TestState("after-batch-1", 3))
+        summaryState.isEmpty,
+        sidecarRow.exists(_.state.contains("after-batch-1"))
       )
     },
     test("readState returns the latest committed state, None on empty table") {
       for
-        path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl2")
-        dest  <- IcebergDestination.fromTable[TestState](table)
-        before <- dest.readState
+        path       <- ZIO.service[Path]
+        table      <- freshTable(path, "tbl2")
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
+        before <- RunContext.withRun("s", "c", "1.0") {
+                    RunContext.streamName.locally("st") { dest.readState }
+                  }
         _      <- dest.writeRecords(Chunk("only"))
-        _      <- dest.commit(TestState("done", 1))
-        after  <- dest.readState
+        _ <- RunContext.withRun("s", "c", "1.0") {
+               RunContext.streamName.locally("st") {
+                 dest.commit(TestState("done", 1))
+               }
+             }
+        after <- RunContext.withRun("s", "c", "1.0") {
+                   RunContext.streamName.locally("st") { dest.readState }
+                 }
       yield assertTrue(before == None, after == Some(TestState("done", 1)))
     },
     test("two destinations over the same warehouse path: second sees first's state (resume)") {
       for
         path <- ZIO.service[Path]
+        // Shared in-memory state store (simulates the same sidecar table).
+        stateStore <- StateStore.InMemory.make
         // First "run": create + write + commit
         table1 <- freshTable(path, "tbl3")
-        dest1  <- IcebergDestination.fromTable[TestState](table1)
+        dest1  <- IcebergDestination.fromTable[TestState](table1, stateStore)
         _      <- dest1.writeRecords(Chunk("a", "b"))
-        _      <- dest1.commit(TestState("page-1-done", 2))
+        _ <- RunContext.withRun("s", "c", "1.0") {
+               RunContext.streamName.locally("st") {
+                 dest1.commit(TestState("page-1-done", 2))
+               }
+             }
         // Second "run": load same table (different Table instance), read state back
         table2 <- loadTable(path, "tbl3")
-        dest2  <- IcebergDestination.fromTable[TestState](table2)
-        resumed <- dest2.readState
+        dest2  <- IcebergDestination.fromTable[TestState](table2, stateStore)
+        resumed <- RunContext.withRun("s", "c", "1.0") {
+                     RunContext.streamName.locally("st") { dest2.readState }
+                   }
       yield assertTrue(resumed == Some(TestState("page-1-done", 2)))
     },
-    test("multiple commits each produce a snapshot; each snapshot has its own state") {
+    test("multiple commits each produce a snapshot; state sidecar holds the latest") {
       for
-        path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl4")
-        dest  <- IcebergDestination.fromTable[TestState](table)
-        _     <- dest.writeRecords(Chunk("r1"))
-        _     <- dest.commit(TestState("c1", 1))
-        _     <- dest.writeRecords(Chunk("r2"))
-        _     <- dest.commit(TestState("c2", 2))
-        _     <- ZIO.attemptBlocking(table.refresh())
+        path       <- ZIO.service[Path]
+        table      <- freshTable(path, "tbl4")
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
+        _ <- RunContext.withRun("s", "c", "1.0") {
+               RunContext.streamName.locally("st") {
+                 dest.writeRecords(Chunk("r1")) *>
+                   dest.commit(TestState("c1", 1)) *>
+                   dest.writeRecords(Chunk("r2")) *>
+                   dest.commit(TestState("c2", 2))
+               }
+             }
+        _ <- ZIO.attemptBlocking(table.refresh())
         snapshots = table.snapshots().asScala.toList
-        // Each snapshot's summary holds the state at the time of that commit.
-        states = snapshots.map(s =>
-          Option(s.summary().get("exlo.state")).flatMap(_.fromJson[TestState].toOption)
-        )
+        // Snapshot summaries must NOT carry exlo.state.
+        summaryStates = snapshots.map(s => Option(s.summary().get("exlo.state")))
+        // Latest state comes from sidecar.
+        latest <- RunContext.withRun("s", "c", "1.0") {
+                    RunContext.streamName.locally("st") { dest.readState }
+                  }
       yield assertTrue(
         snapshots.length == 2,
-        states == List(Some(TestState("c1", 1)), Some(TestState("c2", 2)))
+        summaryStates.forall(_.isEmpty),
+        latest == Some(TestState("c2", 2))
       )
     },
     test("records carry framework-managed metadata columns (sync_id, connector, version, stream, recorded_at)") {
       for
-        path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl-metadata")
-        dest  <- IcebergDestination.fromTable[TestState](table)
+        path       <- ZIO.service[Path]
+        table      <- freshTable(path, "tbl-metadata")
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
         // RunContext + streamName set the FiberRefs that IcebergDestination reads when stamping
         // records. In production, StreamRegistry.runSelected wraps these together; tests do it
         // by hand.
@@ -165,14 +201,51 @@ object IcebergDestinationSpec extends ZIOSpecDefault:
       )
     },
     test("commit with no staged records still advances state (state-only commit)") {
-      // A state-only commit creates a snapshot with no DataFiles but does set the state
-      // property. Useful when the connector advances state without producing records.
+      // A state-only commit writes to the sidecar without creating an Iceberg data snapshot.
+      // Useful when the connector advances state without producing records.
+      for
+        path       <- ZIO.service[Path]
+        table      <- freshTable(path, "tbl5")
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
+        _ <- RunContext.withRun("s", "c", "1.0") {
+               RunContext.streamName.locally("st") {
+                 dest.commit(TestState("just-state", 0))
+               }
+             }
+        snap <- RunContext.withRun("s", "c", "1.0") {
+                  RunContext.streamName.locally("st") { dest.readState }
+                }
+        // No Iceberg snapshot should exist (no data files were written).
+        _ <- ZIO.attemptBlocking(table.refresh())
+        snapshotCount = table.snapshots().asScala.size
+      yield assertTrue(
+        snap == Some(TestState("just-state", 0)),
+        snapshotCount == 0
+      )
+    },
+    test("bootstrap migration: reads legacy exlo.state from snapshot summary on first readState") {
+      // Simulate a table that was previously written with the old snapshot-summary approach.
       for
         path  <- ZIO.service[Path]
-        table <- freshTable(path, "tbl5")
-        dest  <- IcebergDestination.fromTable[TestState](table)
-        _     <- dest.commit(TestState("just-state", 0))
-        snap  <- dest.readState
-      yield assertTrue(snap == Some(TestState("just-state", 0)))
+        table <- freshTable(path, "tbl-bootstrap")
+        // Manually commit a snapshot carrying the old exlo.state property.
+        _ <- ZIO.attemptBlocking {
+               val append = table.newAppend()
+               append.set("exlo.state", """{"cursor":"old-cursor","count":42}""")
+               append.commit()
+             }
+        // Fresh state store (empty — simulates first run after upgrade).
+        stateStore <- StateStore.InMemory.make
+        dest       <- IcebergDestination.fromTable[TestState](table, stateStore)
+        resumed <- RunContext.withRun("s", "c", "1.0") {
+                     RunContext.streamName.locally("st") { dest.readState }
+                   }
+        // After migration, sidecar should have a row.
+        sidecarRow <- stateStore.readLatest("c", "st")
+      yield assertTrue(
+        resumed == Some(TestState("old-cursor", 42)),
+        sidecarRow.isDefined
+      )
     }
   ).provideLayerShared(tempDirLayer)
