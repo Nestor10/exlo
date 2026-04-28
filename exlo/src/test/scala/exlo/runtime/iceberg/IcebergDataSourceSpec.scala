@@ -1,5 +1,6 @@
 package exlo.runtime.iceberg
 
+import exlo.runtime.RunContext
 import org.apache.hadoop.conf.Configuration
 import org.apache.iceberg.Table
 import org.apache.iceberg.hadoop.HadoopTables
@@ -42,9 +43,15 @@ object IcebergDataSourceSpec extends ZIOSpecDefault:
       state: TestState
   ): IO[exlo.domain.ExloError, Long] =
     for
-      dest <- IcebergDestination.fromTable[TestState](table)
+      stateStore <- StateStore.InMemory.make
+      dest <- IcebergDestination.fromTable[TestState](table, stateStore)
       _    <- dest.writeRecords(records)
-      _    <- dest.commit(state)
+      // RunContext is required by commit (reads connectorId/stream for the sidecar).
+      _ <- RunContext.withRun("s", "ds-connector", "1.0") {
+             RunContext.streamName.locally("ds-stream") {
+               dest.commit(state)
+             }
+           }
       snap <- ZIO.attemptBlocking {
                 table.refresh()
                 table.currentSnapshot().snapshotId()
