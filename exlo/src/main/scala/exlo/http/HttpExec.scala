@@ -1,7 +1,11 @@
 package exlo.http
 
+import io.netty.handler.codec.PrematureChannelClosureException
 import zio.*
 import zio.http.*
+
+import java.io.IOException
+import java.util.concurrent.TimeoutException
 
 /**
  * Cross-cutting HTTP execution config shared by [[HttpExtract]] and [[HttpSlice]] builders.
@@ -12,10 +16,30 @@ import zio.http.*
  *     true failures from zio-http's perspective.
  *   - `retryOnStatus` (when set) lifts certain HTTP responses into synthetic failures so they
  *     also flow through the retry schedule. Use for 5xx, 429, etc.
+ *
+ * **Default retry.** `retrySchedule` defaults to a small jittered exponential backoff
+ * (3 retries, ~1s/2s/4s with jitter), gated to *transient network-class* throwables only:
+ * `IOException` (covers connection resets, DNS blips), Netty's
+ * `PrematureChannelClosureException` (load balancer / NAT closes a pooled connection mid
+ * in-flight request), and `TimeoutException`. App-level errors (decoding, schema mismatch)
+ * fail fast — we only retry the things that are physically transient.
+ *
+ * Why narrow rather than blanket-retry: the framework accepts any HTTP verb (GraphQL
+ * sources will use POST), so we can't assume idempotence at the application level. But
+ * TCP/connection failures are safe to retry under any verb: either the request never
+ * reached the server, or the response was lost — and exlo's downstream is dedup-tolerant
+ * (at-least-once is the contract).
+ *
+ * Connector authors override per-stream via `.retry(customSchedule)`.
  */
 private[http] final case class HttpExecConfig(
     headers: Chunk[Header] = Chunk.empty,
-    retrySchedule: Option[Schedule[Any, Any, Any]] = None,
+    retrySchedule: Option[Schedule[Any, Throwable, Any]] =
+      Some(
+        (Schedule.recurWhile[Throwable](HttpExec.isTransient)
+          && Schedule.exponential(1.second)
+          && Schedule.recurs(3)).jittered
+      ),
     retryOnStatus: Option[Status => Boolean] = None,
     oauthFlow: Option[OAuthFlow] = None
 ):
@@ -31,6 +55,17 @@ private[http] final case class HttpExecConfig(
     copy(oauthFlow = Some(flow))
 
 private[http] object HttpExec:
+
+  /**
+   * Predicate identifying transient network-class failures — those for which the request
+   * either never reached the server or the response was lost. Safe to retry under any
+   * HTTP verb (POSTs included) because no application-level state has been touched.
+   */
+  def isTransient(t: Throwable): Boolean = t match
+    case _: IOException                      => true
+    case _: PrematureChannelClosureException => true
+    case _: TimeoutException                 => true
+    case _                                   => false
 
   /** Marker error used to lift a "retryable" response into the failure channel for `retry`. */
   private final case class RetryableResponse(response: Response) extends Throwable
