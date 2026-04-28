@@ -111,9 +111,9 @@ object Table:
         // Read snapshot summary from Iceberg
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
-        // Validate stream name matches (prevent cross-stream contamination)
+        // Validate stream name and table name match (prevent cross-stream/cross-table contamination)
         state <- maybeSummary match {
-          case Some((storedState, storedVersion, storedStreamName)) =>
+          case Some((storedState, storedVersion, storedStreamName, storedTableName)) =>
             if (storedStreamName != streamName) {
               // Stream name mismatch - different stream wrote to this table!
               ZIO.fail(
@@ -122,14 +122,20 @@ object Table:
                     s"This prevents accidental cross-stream contamination. Each stream should write to its own table."
                 )
               )
+            } else if (storedTableName != tableName) {
+              // Table name mismatch - state was inherited from a different table version.
+              // Treat as a fresh start so each table version has its own isolated state.
+              ZIO.logInfo(
+                s"Table name mismatch: stored state belongs to table '$storedTableName' but current table is '$tableName'. Starting fresh."
+              ) *> ZIO.succeed("")
             } else if (storedVersion == stateVersion) {
-              // Stream name and version match → use stored state
+              // Stream name, table name, and version all match → use stored state
               ZIO.succeed(storedState)
             } else {
-              // Stream name matches but version mismatch → trigger fresh start
+              // Stream name and table name match but version mismatch → trigger fresh start
               ZIO.succeed("")
             }
-          case None                                                 =>
+          case None                                                                  =>
             // No snapshot → trigger fresh start
             ZIO.succeed("")
         }

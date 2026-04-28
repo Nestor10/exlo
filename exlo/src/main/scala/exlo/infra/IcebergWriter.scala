@@ -65,14 +65,16 @@ trait IcebergWriter:
    * Commit all staged files as a new snapshot with state metadata.
    *
    * This operation: 1. Retrieves the staged AppendFiles builder 2. Sets exlo.state,
-   * exlo.state.version, and exlo.state.stream_name in snapshot summary 3. Commits the transaction,
-   * creating a new snapshot 4. Clears the staged builder
+   * exlo.state.version, exlo.state.stream_name, and exlo.state.table_name in snapshot summary 3.
+   * Commits the transaction, creating a new snapshot 4. Clears the staged builder
    *
    * If no files were staged, creates an empty snapshot with just the state metadata. This handles
    * the case where we want to checkpoint state even when no data was extracted.
    *
    * @param table
    *   Iceberg Table instance (from CatalogOps.loadTable)
+   * @param tableName
+   *   Iceberg table name to store in snapshot metadata for per-table state isolation
    * @param state
    *   Current connector state to persist in snapshot metadata
    * @param stateVersion
@@ -84,6 +86,7 @@ trait IcebergWriter:
    */
   def commitTransaction(
     table: Table,
+    tableName: String,
     state: String,
     stateVersion: Long,
     streamName: String
@@ -92,17 +95,25 @@ trait IcebergWriter:
   /**
    * Read the most recent snapshot's state metadata.
    *
-   * Returns the connector state, version, and stream name persisted in the latest snapshot's
-   * summary. Used for incremental sync to resume from last checkpoint.
+   * Returns the connector state, version, stream name, and table name persisted in the latest
+   * snapshot's summary. Used for incremental sync to resume from last checkpoint.
+   *
+   * For snapshots created before table-name isolation was introduced, the table name defaults to
+   * the provided tableName parameter (backward-compatible behaviour).
    *
    * @param table
    *   Iceberg Table instance (from CatalogOps.loadTable)
+   * @param tableName
+   *   Current Iceberg table name — used as the default when the snapshot predates
+   *   table-name isolation (backward compatibility)
    * @return
-   *   Tuple of (state: String, stateVersion: Long, streamName: String) or None if no snapshots exist
+   *   Tuple of (state: String, stateVersion: Long, streamName: String, tableName: String) or None
+   *   if no snapshots exist
    */
   def readSnapshotSummary(
-    table: Table
-  ): IO[ExloError, Option[(String, Long, String)]]
+    table: Table,
+    tableName: String
+  ): IO[ExloError, Option[(String, Long, String, String)]]
 
 object IcebergWriter:
 
@@ -120,25 +131,27 @@ object IcebergWriter:
   /**
    * Accessor for commitTransaction.
    *
-   * Use: `IcebergWriter.commitTransaction(table, state, stateVersion, streamName)`
+   * Use: `IcebergWriter.commitTransaction(table, tableName, state, stateVersion, streamName)`
    */
   def commitTransaction(
     table: Table,
+    tableName: String,
     state: String,
     stateVersion: Long,
     streamName: String
   ): ZIO[IcebergWriter, ExloError, Unit] =
-    ZIO.serviceWithZIO[IcebergWriter](_.commitTransaction(table, state, stateVersion, streamName))
+    ZIO.serviceWithZIO[IcebergWriter](_.commitTransaction(table, tableName, state, stateVersion, streamName))
 
   /**
    * Accessor for readSnapshotSummary.
    *
-   * Use: `IcebergWriter.readSnapshotSummary(table)`
+   * Use: `IcebergWriter.readSnapshotSummary(table, tableName)`
    */
   def readSnapshotSummary(
-    table: Table
-  ): ZIO[IcebergWriter, ExloError, Option[(String, Long, String)]] =
-    ZIO.serviceWithZIO[IcebergWriter](_.readSnapshotSummary(table))
+    table: Table,
+    tableName: String
+  ): ZIO[IcebergWriter, ExloError, Option[(String, Long, String, String)]] =
+    ZIO.serviceWithZIO[IcebergWriter](_.readSnapshotSummary(table, tableName))
 
   /**
    * Live implementation - shared Iceberg writer.
@@ -226,6 +239,7 @@ object IcebergWriter:
 
     def commitTransaction(
       table: Table,
+      tableName: String,
       state: String,
       stateVersion: Long,
       streamName: String
@@ -241,6 +255,7 @@ object IcebergWriter:
                 .set("exlo.state", state)
                 .set("exlo.state.version", stateVersion.toString)
                 .set("exlo.state.stream_name", streamName)
+                .set("exlo.state.table_name", tableName)
               appenderWithState.commit()
             } *> appenderRef.set(None)
 
@@ -253,14 +268,16 @@ object IcebergWriter:
                 .set("exlo.state", state)
                 .set("exlo.state.version", stateVersion.toString)
                 .set("exlo.state.stream_name", streamName)
+                .set("exlo.state.table_name", tableName)
                 .commit()
             }
         }
       } yield ()).mapError(ExloError.IcebergWriteError.apply)
 
     def readSnapshotSummary(
-      table: Table
-    ): IO[ExloError, Option[(String, Long, String)]] =
+      table: Table,
+      tableName: String
+    ): IO[ExloError, Option[(String, Long, String, String)]] =
       ZIO
         .attempt {
           // Get current snapshot (null if table is empty)
@@ -271,7 +288,12 @@ object IcebergWriter:
               versionStr   <- summary.get("exlo.state.version")
               streamName   <- summary.get("exlo.state.stream_name")
               stateVersion <- versionStr.toLongOption
-            } yield (state, stateVersion, streamName)
+            } yield {
+              // Default to the current tableName for snapshots created before table-name
+              // isolation was introduced (backward-compatible behaviour).
+              val storedTableName = summary.getOrElse("exlo.state.table_name", tableName)
+              (state, stateVersion, streamName, storedTableName)
+            }
           }
         }
         .mapError(ExloError.StateReadError.apply)
@@ -317,6 +339,8 @@ object IcebergWriter:
    *
    * @param state
    *   The state that was committed
+   * @param tableName
+   *   The table name that was committed
    * @param stateVersion
    *   The state version that was committed
    * @param streamName
@@ -326,6 +350,7 @@ object IcebergWriter:
    */
   case class CommitOperation(
     state: String,
+    tableName: String,
     stateVersion: Long,
     streamName: String,
     writeCount: Int
@@ -373,7 +398,7 @@ object IcebergWriter:
     writesRef: Ref[Chunk[WriteOperation]],
     commitsRef: Ref[Chunk[CommitOperation]],
     stagedWritesRef: Ref[Chunk[WriteOperation]],
-    currentStateRef: Ref[Option[(String, Long, String)]]
+    currentStateRef: Ref[Option[(String, Long, String, String)]]
   ) extends IcebergWriter:
 
     def writeAndStageRecords(
@@ -400,6 +425,7 @@ object IcebergWriter:
 
     def commitTransaction(
       table: Table,
+      tableName: String,
       state: String,
       stateVersion: Long,
       streamName: String
@@ -409,6 +435,7 @@ object IcebergWriter:
 
         commitOp = CommitOperation(
           state = state,
+          tableName = tableName,
           stateVersion = stateVersion,
           streamName = streamName,
           writeCount = staged.length
@@ -418,15 +445,16 @@ object IcebergWriter:
         _ <- commitsRef.update(_ :+ commitOp)
 
         // Update current state
-        _ <- currentStateRef.set(Some((state, stateVersion, streamName)))
+        _ <- currentStateRef.set(Some((state, stateVersion, streamName, tableName)))
 
         // Clear staged writes
         _ <- stagedWritesRef.set(Chunk.empty)
       } yield ()
 
     def readSnapshotSummary(
-      table: Table
-    ): IO[ExloError, Option[(String, Long, String)]] =
+      table: Table,
+      tableName: String
+    ): IO[ExloError, Option[(String, Long, String, String)]] =
       currentStateRef.get
 
     /** Get all captured write operations. */
@@ -470,7 +498,7 @@ object IcebergWriter:
           writesRef       <- Ref.make(Chunk.empty[WriteOperation])
           commitsRef      <- Ref.make(Chunk.empty[CommitOperation])
           stagedWritesRef <- Ref.make(Chunk.empty[WriteOperation])
-          currentStateRef <- Ref.make[Option[(String, Long, String)]](None)
+          currentStateRef <- Ref.make[Option[(String, Long, String, String)]](None)
         } yield InMemory(writesRef, commitsRef, stagedWritesRef, currentStateRef)
       }
 
@@ -494,7 +522,7 @@ object IcebergWriter:
         writesRef       <- Ref.make(Chunk.empty[WriteOperation])
         commitsRef      <- Ref.make(Chunk.empty[CommitOperation])
         stagedWritesRef <- Ref.make(Chunk.empty[WriteOperation])
-        currentStateRef <- Ref.make[Option[(String, Long, String)]](None)
+        currentStateRef <- Ref.make[Option[(String, Long, String, String)]](None)
         instance = InMemory(writesRef, commitsRef, stagedWritesRef, currentStateRef)
         layer    = ZLayer.succeed[IcebergWriter](instance)
       } yield (layer, instance)

@@ -88,7 +88,7 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
 
         // Write and commit
         _ <- writer.writeAndStageRecords(null, records)
-        _ <- writer.commitTransaction(null, """{"cursor":"abc"}""", 1L, "test-stream")
+        _ <- writer.commitTransaction(null, "test-table", """{"cursor":"abc"}""", 1L, "test-stream")
 
         // Assert on captured commit
         commits <- writer.getCommits
@@ -106,7 +106,7 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         // Write, commit, check staged is cleared
         _       <- writer.writeAndStageRecords(null, createTestRecords(3))
         staged1 <- writer.getStagedWrites
-        _       <- writer.commitTransaction(null, """{}""", 1L, "test-stream")
+        _       <- writer.commitTransaction(null, "test-table", """{}""", 1L, "test-stream")
         staged2 <- writer.getStagedWrites
       yield assertTrue(
         staged1.length == 1,
@@ -120,11 +120,11 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         // First cycle
         _ <- writer.writeAndStageRecords(null, createTestRecords(2))
         _ <- writer.writeAndStageRecords(null, createTestRecords(3))
-        _ <- writer.commitTransaction(null, """{"cursor":"first"}""", 1L, "test-stream")
+        _ <- writer.commitTransaction(null, "test-table", """{"cursor":"first"}""", 1L, "test-stream")
 
         // Second cycle
         _ <- writer.writeAndStageRecords(null, createTestRecords(4))
-        _ <- writer.commitTransaction(null, """{"cursor":"second"}""", 2L, "test-stream")
+        _ <- writer.commitTransaction(null, "test-table", """{"cursor":"second"}""", 2L, "test-stream")
 
         // Assert
         writes  <- writer.getWrites
@@ -143,19 +143,19 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         writer <- ZIO.service[IcebergWriter.InMemory]
 
         // Initial state is None
-        state1 <- writer.readSnapshotSummary(null)
+        state1 <- writer.readSnapshotSummary(null, "test-table")
 
         // Commit updates state
-        _      <- writer.commitTransaction(null, """{"cursor":"abc"}""", 1L, "test-stream")
-        state2 <- writer.readSnapshotSummary(null)
+        _      <- writer.commitTransaction(null, "test-table", """{"cursor":"abc"}""", 1L, "test-stream")
+        state2 <- writer.readSnapshotSummary(null, "test-table")
 
         // Another commit updates state again
-        _      <- writer.commitTransaction(null, """{"cursor":"xyz"}""", 2L, "test-stream")
-        state3 <- writer.readSnapshotSummary(null)
+        _      <- writer.commitTransaction(null, "test-table", """{"cursor":"xyz"}""", 2L, "test-stream")
+        state3 <- writer.readSnapshotSummary(null, "test-table")
       yield assertTrue(
         state1.isEmpty,
-        state2 == Some(("""{"cursor":"abc"}""", 1L, "test-stream")),
-        state3 == Some(("""{"cursor":"xyz"}""", 2L, "test-stream"))
+        state2 == Some(("""{"cursor":"abc"}""", 1L, "test-stream", "test-table")),
+        state3 == Some(("""{"cursor":"xyz"}""", 2L, "test-stream", "test-table"))
       )
     },
     test("getAllPayloads returns all user data") {
@@ -183,7 +183,7 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
 
         // Perform some operations
         _ <- writer.writeAndStageRecords(null, createTestRecords(3))
-        _ <- writer.commitTransaction(null, """{}""", 1L, "test-stream")
+        _ <- writer.commitTransaction(null, "test-table", """{}""", 1L, "test-stream")
         _ <- writer.writeAndStageRecords(null, createTestRecords(2))
 
         // Reset
@@ -193,7 +193,7 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         writes  <- writer.getWrites
         commits <- writer.getCommits
         staged  <- writer.getStagedWrites
-        state   <- writer.readSnapshotSummary(null)
+        state   <- writer.readSnapshotSummary(null, "test-table")
         total   <- writer.getTotalRecordCount
       yield assertTrue(
         writes.isEmpty,
@@ -208,16 +208,16 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         writer <- ZIO.service[IcebergWriter.InMemory]
 
         // Commit without any writes
-        _ <- writer.commitTransaction(null, """{"initial":"state"}""", 1L, "test-stream")
+        _ <- writer.commitTransaction(null, "test-table", """{"initial":"state"}""", 1L, "test-stream")
 
         commits <- writer.getCommits
         writes  <- writer.getWrites
-        state   <- writer.readSnapshotSummary(null)
+        state   <- writer.readSnapshotSummary(null, "test-table")
       yield assertTrue(
         commits.length == 1,
         commits.head.writeCount == 0,
         writes.isEmpty,
-        state == Some(("""{"initial":"state"}""", 1L, "test-stream"))
+        state == Some(("""{"initial":"state"}""", 1L, "test-stream", "test-table"))
       )
     }
   ).provide(
@@ -226,7 +226,7 @@ object IcebergWriterInMemorySpec extends ZIOSpecDefault:
         writesRef       <- Ref.make(Chunk.empty[IcebergWriter.WriteOperation])
         commitsRef      <- Ref.make(Chunk.empty[IcebergWriter.CommitOperation])
         stagedWritesRef <- Ref.make(Chunk.empty[IcebergWriter.WriteOperation])
-        currentStateRef <- Ref.make[Option[(String, Long, String)]](None)
+        currentStateRef <- Ref.make[Option[(String, Long, String, String)]](None)
       yield IcebergWriter.InMemory(writesRef, commitsRef, stagedWritesRef, currentStateRef)
     }
   )

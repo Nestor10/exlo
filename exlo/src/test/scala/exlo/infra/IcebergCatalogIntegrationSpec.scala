@@ -98,7 +98,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
 
       } yield assertTrue(
         dataFile.recordCount == 1,
-        maybeSummary.contains((state, stateVersion, streamName))
+        maybeSummary.contains((state, stateVersion, streamName, tableName))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("state version mismatch returns empty summary") {
@@ -175,7 +175,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
       } yield assertTrue(
         file1.recordCount == 1,
         file2.recordCount == 1,
-        maybeSummary.contains((finalState, 1L, streamName))
+        maybeSummary.contains((finalState, 1L, streamName, tableName))
       )).provide(catalogForTable(namespace, tableName))
     },
     test("commit with no staged files still persists state") {
@@ -198,7 +198,7 @@ object IcebergCatalogIntegrationSpec extends ZIOSpec[TestEnvironment]:
         maybeSummary <- catalog.readSnapshotSummary(namespace, tableName)
 
       } yield assertTrue(
-        maybeSummary.contains((finalState, 1L, streamName))
+        maybeSummary.contains((finalState, 1L, streamName, tableName))
       )).provide(catalogForTable(namespace, tableName))
     }
   ) @@ TestAspect.sequential // Run tests sequentially to avoid container issues

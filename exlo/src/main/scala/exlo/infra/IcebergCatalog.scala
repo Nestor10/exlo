@@ -124,20 +124,24 @@ trait IcebergCatalog:
   /**
    * Read EXLO state metadata from the table's current snapshot.
    *
-   * Returns the connector state, version, and stream name persisted in the latest snapshot's
-   * summary. Used for incremental sync to resume from last checkpoint.
+   * Returns the connector state, version, stream name, and table name persisted in the latest
+   * snapshot's summary. Used for incremental sync to resume from last checkpoint.
+   *
+   * For snapshots created before table-name isolation was introduced, the table name defaults to
+   * the provided tableName parameter (backward-compatible behaviour).
    *
    * @param namespace
    *   Iceberg namespace
    * @param tableName
    *   Iceberg table name
    * @return
-   *   Tuple of (state: String, stateVersion: Long, streamName: String) or None if no snapshots exist
+   *   Tuple of (state: String, stateVersion: Long, streamName: String, tableName: String) or None
+   *   if no snapshots exist
    */
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): IO[ExloError, Option[(String, Long, String)]]
+  ): IO[ExloError, Option[(String, Long, String, String)]]
 
   /**
    * Write a batch of ExloRecords to a Parquet file and stage it in the active transaction.
@@ -263,7 +267,7 @@ object IcebergCatalog:
   def readSnapshotSummary(
     namespace: String,
     tableName: String
-  ): ZIO[IcebergCatalog, ExloError, Option[(String, Long, String)]] =
+  ): ZIO[IcebergCatalog, ExloError, Option[(String, Long, String, String)]] =
     ZIO.serviceWithZIO[IcebergCatalog](_.readSnapshotSummary(namespace, tableName))
 
   /**
@@ -302,10 +306,10 @@ object IcebergCatalog:
     def readSnapshotSummary(
       namespace: String,
       tableName: String
-    ): IO[ExloError, Option[(String, Long, String)]] =
+    ): IO[ExloError, Option[(String, Long, String, String)]] =
       for {
         table   <- catalogOps.loadTable(namespace, tableName)
-        summary <- writer.readSnapshotSummary(table)
+        summary <- writer.readSnapshotSummary(table, tableName)
       } yield summary
 
     def writeAndStageRecords(
@@ -327,7 +331,7 @@ object IcebergCatalog:
     ): IO[ExloError, Unit] =
       for {
         table <- catalogOps.loadTable(namespace, tableName)
-        _     <- writer.commitTransaction(table, state, stateVersion, streamName)
+        _     <- writer.commitTransaction(table, tableName, state, stateVersion, streamName)
       } yield ()
 
   object Live:
@@ -378,7 +382,7 @@ object IcebergCatalog:
     def readSnapshotSummary(
       namespace: String,
       tableName: String
-    ): IO[ExloError, Option[(String, Long, String)]] =
+    ): IO[ExloError, Option[(String, Long, String, String)]] =
       val key = s"$namespace.$tableName"
       ZIO.succeed {
         snapshotSummaries.get(key).flatMap { summary =>
@@ -387,7 +391,12 @@ object IcebergCatalog:
             versionStr   <- summary.get("exlo.state.version")
             streamName   <- summary.get("exlo.state.stream_name")
             stateVersion <- versionStr.toLongOption
-          } yield (state, stateVersion, streamName)
+          } yield {
+            // Default to the current tableName for snapshots created before table-name
+            // isolation was introduced (backward-compatible behaviour).
+            val storedTableName = summary.getOrElse("exlo.state.table_name", tableName)
+            (state, stateVersion, streamName, storedTableName)
+          }
         }
       }
 
@@ -427,7 +436,8 @@ object IcebergCatalog:
           Map(
             "exlo.state"             -> state,
             "exlo.state.version"     -> stateVersion.toString,
-            "exlo.state.stream_name" -> streamName
+            "exlo.state.stream_name" -> streamName,
+            "exlo.state.table_name"  -> tableName
           )
         )
         // Clear staged files for this table (simulating transaction commit)
