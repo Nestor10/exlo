@@ -3,6 +3,7 @@ package exlo
 import exlo.domain.{Connector, ExloError}
 import exlo.runtime.{Destination, ExloState, RunContext, Sink, SinkConfig}
 import zio.*
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 /**
  * Framework entry point. Users extend `ZIOAppDefault` and call `Exlo.run` from `def run`,
@@ -31,7 +32,7 @@ object Exlo:
       connector: Connector[S, R, E],
       initialState: => S,
       sinkConfig: SinkConfig = SinkConfig.default
-  ): ZIO[R & Destination[S], Throwable, Unit] =
+  ): ZIO[R & Destination[S] & Tracer, Throwable, Unit] =
     val core = for
       dest      <- ZIO.service[Destination[S]]
       sinkAndSt <- Sink.make[S](initialState, dest, sinkConfig)
@@ -45,9 +46,18 @@ object Exlo:
              ZIO.logAnnotate("sync_id", syncId) {
                ZIO.logAnnotate("connector", connector.id) {
                  ZIO.logAnnotate("version", connector.version) {
-                   ZIO.logInfo("starting connector run") *>
-                     core.tapErrorCause(c => ZIO.logErrorCause("connector run failed", c)) *>
-                     ZIO.logInfo("connector run completed")
+                   ZIO.serviceWithZIO[Tracer] { tracer =>
+                     // Root span — every framework span (HTTP attempts, sink commits) parents
+                     // to this so a single connector run shows up as one trace.
+                     tracer.root(s"connector.run ${connector.id}") { span =>
+                       span.setAttribute("exlo.sync_id", syncId) *>
+                         span.setAttribute("exlo.connector_id", connector.id) *>
+                         span.setAttribute("exlo.connector_version", connector.version) *>
+                         ZIO.logInfo("starting connector run") *>
+                         core.tapErrorCause(c => ZIO.logErrorCause("connector run failed", c)) *>
+                         ZIO.logInfo("connector run completed")
+                     }
+                   }
                  }
                }
              }
@@ -58,11 +68,11 @@ object Exlo:
       connector: Connector[S, R, E],
       sink: Sink[S],
       stateService: ExloState[S]
-  ): ZIO[R, Throwable, Unit] =
+  ): ZIO[R & Tracer, Throwable, Unit] =
     val drain: ZIO[R & ExloState[S], Throwable, Unit] = connector.emit.runDrain
-    val raced: ZIO[R & ExloState[S], Throwable, Unit] =
+    val raced: ZIO[R & Tracer & ExloState[S], Throwable, Unit] =
       drain.raceFirst(sink.runLoop)
 
     raced
       .ensuring(sink.shutdown.orDie)
-      .provideSomeEnvironment[R](_.add[ExloState[S]](stateService))
+      .provideSomeEnvironment[R & Tracer](_.add[ExloState[S]](stateService))

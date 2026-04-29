@@ -2,7 +2,7 @@ package exlo.runtime.iceberg
 
 import exlo.Exlo
 import exlo.domain.Connector
-import exlo.runtime.{Destination, DestinationFactory, ExloState, SinkConfig}
+import exlo.runtime.{Destination, DestinationFactory, ExloState, SinkConfig, Telemetry}
 import exlo.runtime.iceberg.IcebergCodecs.given
 import zio.*
 import zio.stream.ZStream
@@ -23,7 +23,7 @@ object DestinationFactorySpec extends ZIOSpecDefault:
 
   /** Stateless test connector — emits a fixed batch and exits. */
   val testConnector: Connector[Unit, Any, Throwable] =
-    Connector.stateless("factory-test", "0.1.0") {
+    Connector.stateless("factory_test", "0.1.0") {
       ZStream.fromZIO(ExloState.emit[Unit](Chunk("alpha", "beta", "gamma")))
     }
 
@@ -56,7 +56,7 @@ object DestinationFactorySpec extends ZIOSpecDefault:
         // calls inside DestinationFactory + Catalogs + TableConfig.
         _ <- Exlo
                .run(testConnector, (), SinkConfig.testing)
-               .provide(DestinationFactory.layer[Unit]("factory-test"))
+               .provide(DestinationFactory.layer[Unit]("factory_test"), Telemetry.noop)
                .withConfigProvider(envProvider(warehouse))
         // The Hadoop catalog persists table metadata under
         // <warehouse>/<namespace>/<table>. Verify the directory structure exists.

@@ -3,12 +3,14 @@ package examples.zendesk
 import exlo.Exlo
 import exlo.domain.SlicedConnector
 import exlo.http.HttpSlice
-import exlo.runtime.{DestinationFactory, SinkConfig, StreamRegistry}
+import exlo.runtime.{DestinationFactory, SinkConfig, StreamRegistry, Telemetry}
 import zio.*
 import zio.http.*
 import zio.json.*
 import zio.json.ast.Json
+import zio.logging.{ConsoleLoggerConfig, consoleJsonLogger}
 import zio.stream.ZStream
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 import java.time.{Instant, OffsetDateTime, ZoneOffset}
 
@@ -170,7 +172,7 @@ object Zendesk:
       resource: String,
       from: Long       = Instant.parse("2020-01-01T00:00:00Z").getEpochSecond,
       parallelism: Int = 4
-  ): SlicedConnector[Window, State, Client, Throwable] =
+  ): SlicedConnector[Window, State, Client & Tracer, Throwable] =
     HttpSlice[Window, State]
       .slices { state =>
         val to = Instant.now().getEpochSecond
@@ -220,7 +222,7 @@ object Zendesk:
       streamVersion: String,
       resource: String,
       from: Long = Instant.parse("2020-01-01T00:00:00Z").getEpochSecond
-  ): SlicedConnector[Window, State, Client, Throwable] =
+  ): SlicedConnector[Window, State, Client & Tracer, Throwable] =
     HttpSlice[Window, State]
       .slices { state =>
         val to = Instant.now().getEpochSecond
@@ -257,12 +259,12 @@ object Zendesk:
   // ---- specific streams --------------------------------------------------------------------
 
   /** Tickets via `/api/v2/incremental/tickets`. Daily-window slices, parallel backfill. */
-  def tickets(creds: Creds): SlicedConnector[Window, State, Client, Throwable] =
-    incrementalConnector(creds, "zendesk-tickets", "0.1.0", "tickets")
+  def tickets(creds: Creds): SlicedConnector[Window, State, Client & Tracer, Throwable] =
+    incrementalConnector(creds, "zendesk_tickets", "0.1.0", "tickets")
 
   /** Ticket metrics via `/api/v2/ticket_metrics` (no /incremental). Single-slice + cursor stop. */
-  def ticketMetrics(creds: Creds): SlicedConnector[Window, State, Client, Throwable] =
-    slicedCursorConnector(creds, "zendesk-ticket-metrics", "0.1.0", "ticket_metrics")
+  def ticketMetrics(creds: Creds): SlicedConnector[Window, State, Client & Tracer, Throwable] =
+    slicedCursorConnector(creds, "zendesk_ticket_metrics", "0.1.0", "ticket_metrics")
 
 /** Runtime registry. Each entry runs one stream end-to-end via Exlo.run + provided env. */
 object ZendeskStreams:
@@ -274,7 +276,7 @@ object ZendeskStreams:
     )
 
   private def runWith(
-      sliced: SlicedConnector[Zendesk.Window, Zendesk.State, Client, Throwable]
+      sliced: SlicedConnector[Zendesk.Window, Zendesk.State, Client & Tracer, Throwable]
   ): ZIO[Any, Throwable, Unit] =
     for
       sinkCfg <- SinkConfig.fromEnv
@@ -282,7 +284,8 @@ object ZendeskStreams:
              .run(sliced.toConnector, Zendesk.State.zero, sinkCfg)
              .provide(
                Client.default,
-               DestinationFactory.layer[Zendesk.State](sliced.id)
+               DestinationFactory.layer[Zendesk.State](sliced.id),
+               Telemetry.live
              )
     yield ()
 
@@ -292,6 +295,13 @@ object ZendeskStreams:
  * `EXLO_TABLE_NAME`) per stream to run.
  */
 object ZendeskApp extends ZIOAppDefault:
+
+  // Replace ZIO's default text logger with a structured JSON one. Combined with
+  // `Telemetry.live`'s `logAnnotated = true`, every log line carries `trace_id` /
+  // `span_id` for the active span — so logs and traces correlate in the collector.
+  override val bootstrap: ZLayer[Any, Nothing, Unit] =
+    Runtime.removeDefaultLoggers >>> consoleJsonLogger(ConsoleLoggerConfig.default)
+
   def run =
     for
       creds   <- Zendesk.Creds.fromEnv

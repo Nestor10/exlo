@@ -2,7 +2,7 @@ package examples.pokeapi
 
 import exlo.Exlo
 import exlo.http.HttpExtract
-import exlo.runtime.{DestinationFactory, SinkConfig, StreamRegistry}
+import exlo.runtime.{DestinationFactory, SinkConfig, StreamRegistry, Telemetry}
 import exlo.runtime.iceberg.IcebergCodecs.given
 import zio.*
 import zio.http.*
@@ -77,7 +77,8 @@ object PokeApiApp extends ZIOAppDefault:
                  .run(kalosConnector, (), sinkCfg)
                  .provide(
                    Client.default,
-                   DestinationFactory.layer[Unit]("pokeapi")
+                   DestinationFactory.layer[Unit]("pokeapi"),
+                   Telemetry.live
                  )
         yield ()
       }

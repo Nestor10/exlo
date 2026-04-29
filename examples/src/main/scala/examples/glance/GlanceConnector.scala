@@ -7,6 +7,7 @@ import zio.http.*
 import zio.json.*
 import zio.json.ast.Json
 import zio.stream.ZStream
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 /**
  * Glance broadcasts — sliced by region, with intra-slice cursor pagination via `page=N+1`.
@@ -71,7 +72,7 @@ object GlanceConnector:
       token: String,
       regions: List[Region] = allRegions,
       indicators: String = "audience"
-  ): SlicedConnector[Region, State, Client, Throwable] =
+  ): SlicedConnector[Region, State, Client & Tracer, Throwable] =
     HttpSlice[Region, State]
       .slices { state =>
         ZStream.fromIterable(regions).filterNot(r => state.done.contains(r.slug))

@@ -3,6 +3,7 @@ package exlo.runtime
 import exlo.domain.ExloError
 import zio.*
 import zio.stm.*
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 /**
  * Single drain-and-commit fiber.
@@ -41,9 +42,13 @@ final class Sink[S](
       _ <- ZIO.when(chunk.nonEmpty)(destination.writeRecords(chunk))
     yield chunk.length
 
-  /** Commit pending records + current state atomically. */
-  private val commitNow: IO[ExloError, Unit] =
-    currentState.get.commit.flatMap(destination.commit)
+  /** Commit pending records + current state atomically. Spanned so commit latency is visible. */
+  private val commitNow: ZIO[Tracer, ExloError, Unit] =
+    ZIO.serviceWithZIO[Tracer] { tracer =>
+      tracer.span("sink.commit") { _ =>
+        currentState.get.commit.flatMap(destination.commit)
+      }
+    }
 
   /**
    * One tick of the sink loop:
@@ -54,7 +59,7 @@ final class Sink[S](
    * Wrapped in `uninterruptible` from the drain onward so a torn cycle can't lose records
    * that have been taken from the queue but not yet handed to the destination.
    */
-  private val tick: IO[ExloError, Unit] =
+  private val tick: ZIO[Tracer, ExloError, Unit] =
     waitForCount.commit.timeout(config.maxInterval) *>
       ZIO.uninterruptible {
         drainAndStage.flatMap { drained =>
@@ -65,10 +70,10 @@ final class Sink[S](
       }
 
   /** Long-running fiber: ticks forever until interrupted. */
-  def runLoop: IO[ExloError, Unit] = tick.forever
+  def runLoop: ZIO[Tracer, ExloError, Unit] = tick.forever
 
   /** Final flush at run end: drain any remaining records, then commit. */
-  def shutdown: IO[ExloError, Unit] =
+  def shutdown: ZIO[Tracer, ExloError, Unit] =
     ZIO.uninterruptible {
       drainAndStage *> commitNow
     }

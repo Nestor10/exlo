@@ -1,65 +1,65 @@
 # Local Development
 
-Run EXLO locally with MinIO and Nessie (no cloud services needed).
+The fastest way to run a connector locally — no AWS, no servers.
 
-## Quick Start
+## Option 1: Logging destination (no Iceberg at all)
 
-### 1. Start Services
-
-```bash
-docker-compose up -d
-```
-
-(Assumes you have a docker-compose.yml with MinIO and Nessie)
-
-### 2. Configure Environment
+For iterating on connector logic. Records and commits show up as INFO log lines:
 
 ```bash
-export EXLO_STORAGE_WAREHOUSE_PATH="s3://warehouse"
-export EXLO_STORAGE_BACKEND="S3"
-export EXLO_STORAGE_BACKEND_S3_REGION="us-east-1"
-export EXLO_STORAGE_BACKEND_S3_ENDPOINT="http://localhost:9000"
-export EXLO_STORAGE_BACKEND_S3_ACCESS_KEY_ID="minioadmin"
-export EXLO_STORAGE_BACKEND_S3_SECRET_ACCESS_KEY="minioadmin"
-export EXLO_STORAGE_CATALOG="NESSIE"
-export EXLO_STORAGE_CATALOG_NESSIE_URI="http://localhost:19120/api/v1"
-export EXLO_STREAM_NAMESPACE="raw"
-export EXLO_STREAM_TABLE_NAME="test"
-export EXLO_SYNC_STATE_VERSION="1"
+EXLO_STREAM=kalos sbt 'examples/runMain examples.pokeapi.PokeApiApp'
 ```
 
-### 3. Run Example
+Default `EXLO_DESTINATION=logging` means no catalog, no Parquet, no warehouse — just
+log lines you can eyeball.
+
+## Option 2: Local Iceberg (Hadoop catalog)
+
+For validating end-to-end behavior including snapshots, schema, and resume. The Hadoop
+catalog stores metadata as files on disk — no servers required:
 
 ```bash
-sbt "examples/runMain examples.SimpleConnector"
+EXLO_DESTINATION=iceberg \
+EXLO_CATALOG_TYPE=hadoop \
+EXLO_CATALOG_WAREHOUSE=/tmp/exlo-warehouse \
+EXLO_TABLE_NAMESPACE=exlo \
+EXLO_TABLE_NAME=pokeapi_kalos \
+EXLO_STREAM=kalos \
+sbt 'examples/runMain examples.pokeapi.PokeApiApp'
 ```
 
-## Docker Compose Example
+After the run:
+- `/tmp/exlo-warehouse/exlo/pokeapi_kalos/metadata/` — Iceberg metadata JSON / Avro
+- `/tmp/exlo-warehouse/exlo/pokeapi_kalos/data/` — Parquet data files
 
-```yaml
-services:
-  nessie:
-    image: projectnessie/nessie:latest
-    ports:
-      - "19120:19120"
-  
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    command: server /data --console-address ":9001"
+Re-running picks up state from the snapshot summary; you should see one new snapshot
+per run.
+
+## Verifying the table
+
+Use any Iceberg-aware tool against the warehouse path. The CLI [`pyiceberg`](https://py.iceberg.apache.org/)
+is the lightest option:
+
+```bash
+pip install pyiceberg
+pyiceberg --catalog hadoop --uri file:///tmp/exlo-warehouse list exlo
+pyiceberg --catalog hadoop --uri file:///tmp/exlo-warehouse describe exlo.pokeapi_kalos
 ```
 
-## Verify Data
+Or query directly from a Spark / DuckDB session pointed at the same warehouse path.
 
-Access MinIO console: http://localhost:9001
-Access Nessie API: http://localhost:19120/api/v1
+## Inspecting state
+
+Inside the table's `metadata/` directory you'll find versioned metadata JSON files. The
+`current-snapshot-id` plus the snapshot's `summary` (containing `exlo.state`) tells you
+exactly where the connector would resume from.
+
+## Switching to AWS
+
+When you're ready, swap the catalog config — connector code is unchanged. See
+[Configuration](./configuration.md) for the S3 Tables / Glue recipes.
 
 ## Related
 
 - [Configuration](./configuration.md)
-- [Testing](./testing.md)
+- [Integration Testing](./integration-testing.md)

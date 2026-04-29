@@ -3,6 +3,7 @@ package exlo.http
 import io.netty.handler.codec.PrematureChannelClosureException
 import zio.*
 import zio.http.*
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 import java.io.IOException
 import java.util.concurrent.TimeoutException
@@ -79,7 +80,7 @@ private[http] object HttpExec:
       req: Request,
       cfg: HttpExecConfig,
       tokenManager: Option[TokenManager]
-  ): ZIO[Client, Throwable, Response] =
+  ): ZIO[Client & Tracer, Throwable, Response] =
     val withStaticHeaders = cfg.headers.foldLeft(req)((r, h) => r.addHeader(h))
 
     val withAuth: ZIO[Client, Throwable, Request] = tokenManager match
@@ -99,5 +100,16 @@ private[http] object HttpExec:
       case None    => sendOnce
 
     // If the final outcome is a "retryable" response that exhausted the schedule, return it
-    // rather than failing — the caller can inspect the status and decide.
-    withRetries.catchSome { case RetryableResponse(r) => ZIO.succeed(r) }
+    // rather than failing — the caller can inspect the status and decide. One span covers the
+    // full attempt-and-retry cycle (retry deltas show up in span duration, not as child spans).
+    val sendWithFallback = withRetries.catchSome { case RetryableResponse(r) => ZIO.succeed(r) }
+
+    ZIO.serviceWithZIO[Tracer] { tracer =>
+      tracer.span(s"HTTP ${req.method.name}") { span =>
+        span.setAttribute("http.method", req.method.name) *>
+          span.setAttribute("http.url", req.url.encode) *>
+          sendWithFallback.tap(resp =>
+            span.setAttribute("http.status_code", resp.status.code.toLong)
+          )
+      }
+    }

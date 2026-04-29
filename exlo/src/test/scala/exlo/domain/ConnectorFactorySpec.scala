@@ -1,7 +1,7 @@
 package exlo.domain
 
 import exlo.Exlo
-import exlo.runtime.{Destination, ExloState, SinkConfig}
+import exlo.runtime.{Destination, ExloState, SinkConfig, Telemetry}
 import zio.*
 import zio.stream.ZStream
 import zio.test.*
@@ -17,7 +17,7 @@ object ConnectorFactorySpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[Unit]
         fiber <- Exlo
                    .run(c, (), SinkConfig.testing)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[Unit]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[Unit]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(1.second)
         _    <- fiber.join
@@ -26,7 +26,7 @@ object ConnectorFactorySpec extends ZIOSpecDefault:
     },
     test("fromStream: stateful connector via inline factory") {
       final case class S(seq: Long)
-      val c = Connector.fromStream[S, Any, Throwable]("stateful-inline", "0.1.0") {
+      val c = Connector.fromStream[S, Any, Throwable]("stateful_inline", "0.1.0") {
         ZStream
           .fromIterable(1 to 3)
           .mapZIO { i =>
@@ -38,7 +38,7 @@ object ConnectorFactorySpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[S]
         fiber <- Exlo
                    .run(c, S(0), SinkConfig.testing)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[S]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[S]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(1.second)
         _    <- fiber.join

@@ -1,7 +1,7 @@
 package exlo
 
 import exlo.domain.Connector
-import exlo.runtime.{Destination, ExloState, SinkConfig}
+import exlo.runtime.{Destination, ExloState, SinkConfig, Telemetry}
 import zio.*
 import zio.stream.ZStream
 import zio.test.*
@@ -32,7 +32,7 @@ object EndToEndSpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[CounterState]
         fiber <- Exlo
                    .run(new CountingConnector(batches = 4, perBatch = 5), CounterState(0), cfg)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[CounterState]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[CounterState]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(500.millis)
         _    <- fiber.join

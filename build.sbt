@@ -1,8 +1,12 @@
 val scala3Version    = "3.7.3"
-val zioVersion       = "2.1.22"
+val zioVersion       = "2.1.25"
 val zioConfigVersion = "4.0.5"
-val zioJsonVersion   = "0.7.3"
-val zioHttpVersion   = "3.0.1"
+val zioJsonVersion   = "0.9.0"
+val zioHttpVersion   = "3.11.0"
+val zioLoggingVersion = "2.5.0"
+val zioOtelVersion   = "4.0.0-RC11"
+val otelSdkVersion   = "1.61.0"
+val otelInstrVersion = "2.20.0-alpha"
 val icebergVersion   = "1.10.0"
 val awsVersion       = "2.37.2"
 val nessieVersion    = "0.105.6"
@@ -35,6 +39,19 @@ lazy val exlo = project
       "dev.zio" %% "zio-config"          % zioConfigVersion,
       "dev.zio" %% "zio-config-magnolia" % zioConfigVersion,
       "dev.zio" %% "zio-config-typesafe" % zioConfigVersion,
+
+      // ZIO Logging — JSON formatter with trace_id / span_id labels
+      "dev.zio" %% "zio-logging" % zioLoggingVersion,
+
+      // OpenTelemetry — pure-ZIO context (FiberRef storage). SDK is provided explicitly
+      // per zio-opentelemetry 4.x. Trace/span IDs reach JSON logs via `logAnnotated = true`
+      // on `OpenTelemetry.custom`, so the `zio-opentelemetry-zio-logging` LogRecord bridge
+      // is unnecessary for stdout JSON.
+      "dev.zio"           %% "zio-opentelemetry"             % zioOtelVersion,
+      "io.opentelemetry"   % "opentelemetry-sdk"             % otelSdkVersion,
+      "io.opentelemetry"   % "opentelemetry-exporter-otlp"   % otelSdkVersion,
+      "io.opentelemetry"   % "opentelemetry-sdk-extension-autoconfigure" % otelSdkVersion,
+      "io.opentelemetry.instrumentation" % "opentelemetry-runtime-telemetry-java17" % otelInstrVersion,
 
       // Apache Iceberg — the platform substrate for atomic commits + multi-connector DAGs
       "org.apache.iceberg" % "iceberg-core"    % icebergVersion,

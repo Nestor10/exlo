@@ -1,7 +1,7 @@
 package examples.glance
 
 import exlo.Exlo
-import exlo.runtime.{Destination, SinkConfig}
+import exlo.runtime.{Destination, SinkConfig, Telemetry}
 import zio.*
 import zio.http.*
 import zio.test.*
@@ -34,7 +34,7 @@ object GlanceConnectorSpec extends ZIOSpecDefault:
         _    <- TestClient.addRoutes(testRoutes)
         _ <- Exlo
                .run(connector.toConnector, GlanceConnector.State(Set.empty), SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[GlanceConnector.State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[GlanceConnector.State]](dest) ++ Telemetry.noop)
         all  <- dest.allRecords
         snap <- dest.readState
       yield assertTrue(

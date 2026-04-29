@@ -1,7 +1,7 @@
 package exlo.domain
 
 import exlo.Exlo
-import exlo.runtime.{Destination, ExloState, SinkConfig}
+import exlo.runtime.{Destination, ExloState, SinkConfig, Telemetry}
 import zio.*
 import zio.stream.ZStream
 import zio.test.*
@@ -40,7 +40,7 @@ object SlicedConnectorSpec extends ZIOSpecDefault:
         connector = new CountingSlicedConnector(numSlices = 8, recordsPerSlice = 5, par = 4)
         fiber <- Exlo
                    .run(connector.toConnector, State(Set.empty), cfg)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(2.seconds)
         _    <- fiber.join
@@ -61,7 +61,7 @@ object SlicedConnectorSpec extends ZIOSpecDefault:
         connector = new CountingSlicedConnector(numSlices = 5, recordsPerSlice = 5, par = 4)
         fiber <- Exlo
                    .run(connector.toConnector, State(Set.empty), cfg)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(2.seconds)
         _    <- fiber.join
@@ -80,7 +80,7 @@ object SlicedConnectorSpec extends ZIOSpecDefault:
         connector = new CountingSlicedConnector(numSlices = 32, recordsPerSlice = 3, par = 16)
         fiber <- Exlo
                    .run(connector.toConnector, State(Set.empty), cfg)
-                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest))
+                   .provideSomeLayer[Any](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
                    .fork
         _    <- TestClock.adjust(2.seconds)
         _    <- fiber.join

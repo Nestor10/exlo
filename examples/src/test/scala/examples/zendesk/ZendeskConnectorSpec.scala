@@ -1,7 +1,7 @@
 package examples.zendesk
 
 import exlo.Exlo
-import exlo.runtime.{Destination, SinkConfig}
+import exlo.runtime.{Destination, SinkConfig, Telemetry}
 import zio.*
 import zio.http.*
 import zio.test.*
@@ -68,7 +68,7 @@ object ZendeskConnectorSpec extends ZIOSpecDefault:
   def spec = suite("Zendesk")(
     test("incrementalConnector: walks per-window pages, marks each window done") {
       val connector = Zendesk.incrementalConnector(
-        creds, "zendesk-tickets", "0.1.0", "tickets",
+        creds, "zendesk_tickets", "0.1.0", "tickets",
         from = testFrom, parallelism = 4
       )
       for
@@ -76,7 +76,7 @@ object ZendeskConnectorSpec extends ZIOSpecDefault:
         _    <- TestClient.addRoutes(testRoutes)
         _ <- Exlo
                .run(connector.toConnector, Zendesk.State.zero, SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[Zendesk.State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[Zendesk.State]](dest) ++ Telemetry.noop)
         all  <- dest.allRecords
         snap <- dest.readState
       yield assertTrue(
@@ -90,7 +90,7 @@ object ZendeskConnectorSpec extends ZIOSpecDefault:
     }.provide(TestClient.layer),
     test("slicedCursorConnector: descending walk, stop when oldest predates slice.start") {
       val connector = Zendesk.slicedCursorConnector(
-        creds, "zendesk-ticket-metrics", "0.1.0", "ticket_metrics",
+        creds, "zendesk_ticket_metrics", "0.1.0", "ticket_metrics",
         from = testFrom
       )
       for
@@ -98,7 +98,7 @@ object ZendeskConnectorSpec extends ZIOSpecDefault:
         _    <- TestClient.addRoutes(testRoutes)
         _ <- Exlo
                .run(connector.toConnector, Zendesk.State.zero, SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[Zendesk.State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[Zendesk.State]](dest) ++ Telemetry.noop)
         all  <- dest.allRecords
         snap <- dest.readState
       yield assertTrue(

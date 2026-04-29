@@ -19,7 +19,7 @@ object SinkSpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[TestState]
         pair <- Sink.make[TestState](TestState(0), dest, SinkConfig.testing)
         (sink, _) = pair
-        loop <- sink.runLoop.fork
+        loop <- sink.runLoop.provide(Telemetry.noop).fork
         // No emits, no updates. Advance clock to trigger the time threshold once.
         _ <- TestClock.adjust(SinkConfig.testing.maxInterval * 2)
         _ <- loop.interrupt.ignore
@@ -39,7 +39,7 @@ object SinkSpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[TestState]
         pair <- Sink.make[TestState](TestState(0), dest, cfg)
         (sink, live) = pair
-        loop <- sink.runLoop.fork
+        loop <- sink.runLoop.provide(Telemetry.noop).fork
         _    <- live.emit(Chunk("a", "b", "c"))
         _    <- live.update(_.copy(seq = 3))
         _    <- TestClock.adjust(150.millis)
@@ -59,7 +59,7 @@ object SinkSpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[TestState]
         pair <- Sink.make[TestState](TestState(0), dest, cfg)
         (sink, live) = pair
-        loop <- sink.runLoop.fork
+        loop <- sink.runLoop.provide(Telemetry.noop).fork
         _    <- live.update(_.copy(seq = 5))
         _    <- live.emit(Chunk("r1", "r2", "r3", "r4", "r5"))
         _    <- dest.commitCount.repeatUntil(_ >= 1)
@@ -75,7 +75,7 @@ object SinkSpec extends ZIOSpecDefault:
         dest <- Destination.InMemory.make[TestState]
         pair <- Sink.make[TestState](TestState(0), dest, cfg)
         (sink, live) = pair
-        loop <- sink.runLoop.fork
+        loop <- sink.runLoop.provide(Telemetry.noop).fork
         _    <- live.update(_.copy(seq = 1))
         _    <- TestClock.adjust(150.millis)
         _    <- dest.commitCount.repeatUntil(_ >= 1)

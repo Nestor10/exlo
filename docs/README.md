@@ -1,32 +1,33 @@
-# EXLO Documentation
+# exlo Documentation
 
-Short, focused guides for building EXLO connectors.
+Short, focused guides for building exlo connectors.
 
-## Getting Started
+## Start here
 
-- [Getting Started](./getting-started.md) - Build your first connector
-- [Configuration](./configuration.md) - Environment variables
-- [Local Development](./local-development.md) - Run locally with Docker
+- [Getting Started](./getting-started.md) — the three connector shapes (`fullPull`,
+  `HttpExtract`, `HttpSlice`) walked through as small sets of questions
+- [Configuration](./configuration.md) — `EXLO_*` environment variables
+- [Local Development](./local-development.md) — run a connector locally with logging
+  or a local Iceberg warehouse
+- [Telemetry](./telemetry.md) — OTel spans, JVM metrics, JSON logs with `trace_id`
 
 ## Patterns
 
-- [Pagination](./pagination.md) - Handle paginated APIs
-- [Incremental Sync](./incremental-sync.md) - Fetch only new data
-- [Dependencies](./dependencies.md) - Use HTTP clients, databases, etc.
-- [State Management](./state-management.md) - Resumability and checkpoints
+- [Adaptive Slicing](./adaptive-slicing.md) — slice factories that react to mid-run
+  state mutations (bisection, poison-pill skip, dynamic window width)
 
-## Reference
+## Testing
 
-- [Testing](./testing.md) - Unit and integration tests
-- [Error Handling](./error-handling.md) - Debugging and troubleshooting
-- [Best Practices](./best-practices.md) - Production-ready patterns
+- [Integration Testing](./integration-testing.md) — tests that hit real APIs
 
 ## Examples
 
-All examples are compilable and runnable. See `/examples/README.md`.
+Compilable, runnable examples live in `examples/src/main/scala/`. Start with
+`examples/pokeapi/PokeApiApp.scala` (full-pull) and work up from there.
 
-## Architecture
+## Architecture & internals
 
-For framework internals and architecture details, see:
-- [Developer Guide](/context/DEVELOPER_GUIDE.md) - Architecture and design
-- [Configuration Deep Dive](/context/CONFIGURATION.md) - Full config reference
+For framework internals beyond what a connector author needs:
+- `/context/DEVELOPER_GUIDE.md` — architecture and design
+- `/context/CONFIG.md` — full configuration reference with deploy recipes
+- `/context/PHASE_9_EKS_DEPLOY.md` — production EKS deploy walkthrough

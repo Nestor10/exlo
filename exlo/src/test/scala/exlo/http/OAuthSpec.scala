@@ -1,7 +1,7 @@
 package exlo.http
 
 import exlo.Exlo
-import exlo.runtime.{Destination, ExloState, SinkConfig}
+import exlo.runtime.{Destination, ExloState, SinkConfig, Telemetry}
 import zio.*
 import zio.http.*
 import zio.json.*
@@ -68,7 +68,7 @@ object OAuthSpec extends ZIOSpecDefault:
         _       <- TestClient.addRoutes(tokenEndpoint(counter) ++ protectedEndpoint)
         _ <- Exlo
                .run(buildConnector(flow), State(1), SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
         all       <- dest.allRecords
         tokenHits <- counter.get
       yield assertTrue(
@@ -89,7 +89,7 @@ object OAuthSpec extends ZIOSpecDefault:
         _       <- TestClient.addRoutes(tokenEndpoint(counter) ++ protectedEndpoint)
         _ <- Exlo
                .run(buildConnector(flow), State(1), SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
         all <- dest.allRecords
       yield assertTrue(all == Chunk("alpha", "beta"))
     }.provide(TestClient.layer),
@@ -107,7 +107,7 @@ object OAuthSpec extends ZIOSpecDefault:
         _       <- TestClient.addRoutes(tokenEndpoint(counter) ++ protectedEndpoint)
         _ <- Exlo
                .run(buildConnector(flow), State(1), SinkConfig.testing)
-               .provideSome[Client](ZLayer.succeed[Destination[State]](dest))
+               .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
         all <- dest.allRecords
       yield assertTrue(all == Chunk("alpha", "beta"))
     }.provide(TestClient.layer),
@@ -127,7 +127,7 @@ object OAuthSpec extends ZIOSpecDefault:
         _    <- TestClient.addRoutes(badTokenRoute ++ protectedEndpoint)
         result <- Exlo
                     .run(buildConnector(flow), State(1), SinkConfig.testing)
-                    .provideSome[Client](ZLayer.succeed[Destination[State]](dest))
+                    .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
                     .either
       yield assertTrue(
         result.left.exists { e =>

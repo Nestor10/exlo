@@ -1,10 +1,11 @@
 package exlo.http
 
-import exlo.domain.Connector
+import exlo.domain.{Connector, RecoveryAction}
 import exlo.runtime.ExloState
 import zio.*
 import zio.http.*
 import zio.stream.ZStream
+import zio.telemetry.opentelemetry.core.trace.Tracer
 
 /**
  * Cursor-paginated HTTP extraction. The connector author describes:
@@ -60,20 +61,31 @@ object HttpExtract:
       private[http] val recordsFn: Option[P => Chunk[String]],
       private[http] val nextRequestFn: Option[(S, P) => Option[Request]],
       private[http] val advanceFn: Option[(S, P) => S],
+      private[http] val recoverFn: Option[PartialFunction[(S, Throwable), RecoveryAction[S]]] = None,
       private[http] val cfg: HttpExecConfig = HttpExecConfig()
   ):
 
     private def withCfg(c: HttpExecConfig): ParsedBuilder[S, P, RecSet, AdvSet] =
-      new ParsedBuilder(requestFn, parseFn, recordsFn, nextRequestFn, advanceFn, c)
+      new ParsedBuilder(requestFn, parseFn, recordsFn, nextRequestFn, advanceFn, recoverFn, c)
 
     def records(f: P => Chunk[String]): ParsedBuilder[S, P, Provided, AdvSet] =
-      new ParsedBuilder(requestFn, parseFn, Some(f), nextRequestFn, advanceFn, cfg)
+      new ParsedBuilder(requestFn, parseFn, Some(f), nextRequestFn, advanceFn, recoverFn, cfg)
 
     def nextRequest(f: (S, P) => Option[Request]): ParsedBuilder[S, P, RecSet, AdvSet] =
-      new ParsedBuilder(requestFn, parseFn, recordsFn, Some(f), advanceFn, cfg)
+      new ParsedBuilder(requestFn, parseFn, recordsFn, Some(f), advanceFn, recoverFn, cfg)
 
     def advance(f: (S, P) => S): ParsedBuilder[S, P, RecSet, Provided] =
-      new ParsedBuilder(requestFn, parseFn, recordsFn, nextRequestFn, Some(f), cfg)
+      new ParsedBuilder(requestFn, parseFn, recordsFn, nextRequestFn, Some(f), recoverFn, cfg)
+
+    /**
+     * Convert a specific class of error into a state mutation that re-enters the walk
+     * at the request stage. See [[RecoveryAction]] for semantics. Errors not matched by
+     * the partial fail the stream as before.
+     */
+    def recover(
+        pf: PartialFunction[(S, Throwable), RecoveryAction[S]]
+    ): ParsedBuilder[S, P, RecSet, AdvSet] =
+      new ParsedBuilder(requestFn, parseFn, recordsFn, nextRequestFn, advanceFn, Some(pf), cfg)
 
     def header(h: Header): ParsedBuilder[S, P, RecSet, AdvSet]            = withCfg(cfg.addHeader(h))
     def bearer(token: String): ParsedBuilder[S, P, RecSet, AdvSet]        = withCfg(cfg.addHeader(Header.Authorization.Bearer(token)))
@@ -93,42 +105,56 @@ object HttpExtract:
 
   /** `.toConnector` available when both `records` and `advance` are set. */
   extension [S, P](b: ParsedBuilder[S, P, Provided, Provided])
-    def toConnector(id: String, version: String)(using Tag[S]): Connector[S, Client, Throwable] =
-      Connector.fromStream[S, Client, Throwable](id, version) {
+    def toConnector(id: String, version: String)(using Tag[S]): Connector[S, Client & Tracer, Throwable] =
+      Connector.fromStream[S, Client & Tracer, Throwable](id, version) {
         val initial   = b.requestFn
         val parse     = b.parseFn
         val records   = b.recordsFn.get
         val maybeNext = b.nextRequestFn
         val advance   = b.advanceFn.get
+        val recover   = b.recoverFn
 
         sealed trait Step
         case object Start                  extends Step
         final case class More(req: Request) extends Step
         case object Done                   extends Step
 
+        // One iteration of the walk. Returns the next step (or `Done`). If the request
+        // fails AND the connector's `.recover` partial matches, we mutate state and loop
+        // back to `Start` instead of failing the stream.
+        def runStep(step: Step, tm: Option[TokenManager]): ZIO[Client & Tracer & ExloState[S], Throwable, Step] =
+          for
+            state <- ExloState.current[S]
+            req = step match
+                    case Start     => initial(state)
+                    case More(r)   => r
+                    case Done      => throw new MatchError(step) // unreachable
+            attempt <- HttpExec
+                         .execute(req, b.cfg, tm)
+                         .flatMap(parse)
+                         .either
+            next <- attempt match
+                      case Right(page) =>
+                        for
+                          _        <- ExloState.emit[S](records(page))
+                          _        <- ExloState.update[S](s => advance(s, page))
+                          newState <- ExloState.current[S]
+                        yield maybeNext.flatMap(_(newState, page).map(More(_))).getOrElse(Done)
+                      case Left(err) =>
+                        recover.flatMap(_.lift((state, err))) match
+                          case Some(RecoveryAction.Continue(newState)) =>
+                            ExloState.update[S](_ => newState).as(Start)
+                          case _ =>
+                            ZIO.fail(err)
+          yield next
+
         // Build a TokenManager once per connector run (if oauth was configured); it caches
         // the access token + handles refresh. Inherited by all unfold iterations via closure.
         ZStream.unwrap {
           ZIO.foreach(b.cfg.oauthFlow)(TokenManager.make).map { tm =>
-            ZStream.unfoldZIO[Client & ExloState[S], Throwable, Unit, Step](Start) {
+            ZStream.unfoldZIO[Client & Tracer & ExloState[S], Throwable, Unit, Step](Start) {
               case Done => ZIO.succeed(None)
-              case step =>
-                for
-                  state <- ExloState.current[S]
-                  req = step match
-                          case Start     => initial(state)
-                          case More(r)   => r
-                          case Done      => throw new MatchError(step) // unreachable
-                  resp <- HttpExec.execute(req, b.cfg, tm)
-                  page <- parse(resp)
-                  recs = records(page)
-                  _ <- ExloState.emit[S](recs)
-                  _ <- ExloState.update[S](s => advance(s, page))
-                  newState <- ExloState.current[S]
-                  nextStep = maybeNext
-                               .flatMap(_(newState, page).map(More(_)))
-                               .getOrElse(Done)
-                yield Some(((), nextStep))
+              case step => runStep(step, tm).map(next => Some(((), next)))
             }
           }
         }
@@ -164,8 +190,8 @@ object HttpExtract:
     def oauth(flow: OAuthFlow): FullPullParsed[P, RecSet]              = withCfg(cfg.withOAuth(flow))
 
   extension [P](b: FullPullParsed[P, Provided])
-    def toConnector(id: String, version: String): Connector[Unit, Client, Throwable] =
-      Connector.fromStream[Unit, Client, Throwable](id, version) {
+    def toConnector(id: String, version: String): Connector[Unit, Client & Tracer, Throwable] =
+      Connector.fromStream[Unit, Client & Tracer, Throwable](id, version) {
         val req     = b.requestThunk
         val parse   = b.parseFn
         val records = b.recordsFn.get
