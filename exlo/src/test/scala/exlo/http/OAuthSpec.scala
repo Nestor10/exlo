@@ -111,6 +111,58 @@ object OAuthSpec extends ZIOSpecDefault:
         all <- dest.allRecords
       yield assertTrue(all == Chunk("alpha", "beta"))
     }.provide(TestClient.layer),
+    test("Password grant supports a custom grant_type and query-param injection") {
+      // Capture exactly what the token endpoint received so we can assert the request was
+      // shaped to match a non-standard ROPC layout: a custom grant_type in the body, with
+      // username + client_id + grant_type pinned to the URL query string.
+      final case class Captured(query: QueryParams, body: String)
+      val flow = OAuthFlow.Password(
+        tokenUrl    = URL.decode("http://test.invalid/token").toOption.get,
+        clientId    = "custom-api-client",
+        username    = "user@example.com",
+        password    = "hunter2",
+        grantType   = "custom-password",
+        queryParams = Map(
+          "username"   -> "user@example.com",
+          "client_id"  -> "custom-api-client",
+          "grant_type" -> "custom-password"
+        )
+      )
+      val capturingTokenRoute: Ref[Option[Captured]] => Routes[Any, Response] = capture =>
+        Routes(
+          Method.POST / "token" -> handler { (req: Request) =>
+            (for
+              body <- req.body.asString
+              _    <- capture.set(Some(Captured(req.url.queryParams, body)))
+            yield Response.json(
+              """{"access_token":"issued-token-abc-1","token_type":"Bearer","expires_in":3600}"""
+            )).orDie
+          }
+        )
+      for
+        dest    <- Destination.InMemory.make[State]
+        capture <- Ref.make(Option.empty[Captured])
+        _       <- TestClient.addRoutes(capturingTokenRoute(capture) ++ protectedEndpoint)
+        _ <- Exlo
+               .run(buildConnector(flow), State(1), SinkConfig.testing)
+               .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
+        all      <- dest.allRecords
+        captured <- capture.get
+      yield
+        val c = captured.getOrElse(throw new AssertionError("token endpoint was not called"))
+        assertTrue(
+          all == Chunk("alpha", "beta"),
+          // Custom grant_type lands in the POST body (form-encoded).
+          c.body.contains("grant_type=custom-password"),
+          c.body.contains("password=hunter2"),
+          c.body.contains("client_id=custom-api-client"),
+          c.body.contains("username=user%40example.com"),
+          // queryParams are injected into the token URL — not stripped, not double-encoded.
+          c.query.queryParam("username").contains("user@example.com"),
+          c.query.queryParam("client_id").contains("custom-api-client"),
+          c.query.queryParam("grant_type").contains("custom-password")
+        )
+    }.provide(TestClient.layer),
     test("token endpoint failure surfaces as a Throwable with the response body") {
       val flow = OAuthFlow.ClientCredentials(
         tokenUrl     = URL.decode("http://test.invalid/token").toOption.get,

@@ -62,14 +62,25 @@ object OAuthFlow:
    *
    * If the response includes a `refresh_token`, the framework switches to refresh-token
    * grant for subsequent refreshes (no need to re-send the password).
+   *
+   * `grantType` defaults to the standard `"password"` value but can be overridden for
+   * providers that ship a non-standard variant of ROPC under a different grant name.
+   *
+   * `queryParams` are merged into the token URL's query string rather than the POST
+   * body. Some providers demand certain fields — `username`, `client_id`, even
+   * `grant_type` — as URL query parameters while keeping the password in the body.
+   * Use this to model those non-standard layouts. Defaults to empty for the standard
+   * ROPC path.
    */
   final case class Password(
       tokenUrl: URL,
       clientId: String,
-      clientSecret: Option[String] = None,
+      clientSecret: Option[String]    = None,
       username: String,
       password: String,
-      scope: Option[String] = None
+      scope: Option[String]           = None,
+      grantType: String               = "password",
+      queryParams: Map[String, String] = Map.empty
   ) extends OAuthFlow
 
 /** Standard OAuth 2 token endpoint response (RFC 6749 §5.1). */
@@ -188,7 +199,7 @@ object TokenManager:
         ) ++ scope.map("scope" -> _)
         url -> formEncode(params)
 
-      case OAuthFlow.Password(url, id, secretOpt, user, pass, scope) =>
+      case OAuthFlow.Password(url, id, secretOpt, user, pass, scope, grantType, queryParams) =>
         // After the first fetch, prefer refresh_token grant if the token endpoint issued
         // one (avoids retransmitting the password on every refresh).
         cachedRefresh match
@@ -201,12 +212,12 @@ object TokenManager:
             url -> formEncode(params)
           case None =>
             val params = Map(
-              "grant_type" -> "password",
+              "grant_type" -> grantType,
               "client_id"  -> id,
               "username"   -> user,
               "password"   -> pass
             ) ++ secretOpt.map("client_secret" -> _) ++ scope.map("scope" -> _)
-            url -> formEncode(params)
+            withQueryParams(url, queryParams) -> formEncode(params)
 
     private def formEncode(params: Map[String, String]): String =
       params
@@ -214,6 +225,15 @@ object TokenManager:
           s"${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"
         }
         .mkString("&")
+
+    /**
+     * Merge additional query parameters into a token URL. Used by the Password flow's
+     * `queryParams` field to support providers that demand certain credentials in the
+     * URL rather than the POST body.
+     */
+    private def withQueryParams(url: URL, extras: Map[String, String]): URL =
+      if extras.isEmpty then url
+      else extras.foldLeft(url) { case (u, (k, v)) => u.addQueryParam(k, v) }
 
     private def truncate(s: String, n: Int): String =
       if s.length <= n then s else s.take(n) + s"… (+${s.length - n} chars)"
