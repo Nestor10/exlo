@@ -285,7 +285,7 @@ object ZendeskStreams:
              .provide(
                Client.default,
                DestinationFactory.layer[Zendesk.State](sliced.id),
-               Telemetry.live
+               Telemetry.auto
              )
     yield ()
 
@@ -297,8 +297,9 @@ object ZendeskStreams:
 object ZendeskApp extends ZIOAppDefault:
 
   // Replace ZIO's default text logger with a structured JSON one. Combined with
-  // `Telemetry.live`'s `logAnnotated = true`, every log line carries `trace_id` /
-  // `span_id` for the active span — so logs and traces correlate in the collector.
+  // `Telemetry.auto`'s `logAnnotated = true` (when `live` is selected), every log line
+  // carries `trace_id` / `span_id` for the active span — so logs and traces correlate
+  // in the collector.
   override val bootstrap: ZLayer[Any, Nothing, Unit] =
     Runtime.removeDefaultLoggers >>> consoleJsonLogger(ConsoleLoggerConfig.default)
 

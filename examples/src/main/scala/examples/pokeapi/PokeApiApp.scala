@@ -78,7 +78,7 @@ object PokeApiApp extends ZIOAppDefault:
                  .provide(
                    Client.default,
                    DestinationFactory.layer[Unit]("pokeapi"),
-                   Telemetry.live
+                   Telemetry.auto
                  )
         yield ()
       }
