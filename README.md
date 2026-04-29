@@ -1,31 +1,52 @@
 # exlo
-Opinionated extract and load framework
 
-## sbt project compiled with Scala 3
+Opinionated Scala 3 / ZIO framework for HTTP ingestion connectors. You describe what to
+fetch and how state moves; the framework drives the loop, retries transient network
+failures, lands records in Iceberg, and persists state durably.
 
-### Usage
+## Modules
 
-This is a normal sbt project. You can compile code with `sbt compile`, run it with `sbt run`, and `sbt console` will start a Scala 3 REPL.
+- `exlo` — the framework
+- `examples` — runnable connector examples (`pokeapi`, more to come)
 
-### Testing
+## Build & test
 
-**Unit and Integration Tests:**
 ```bash
-sbt exlo/test
+sbt compile
+sbt test          # framework + examples
+sbt exlo/test     # framework only
 ```
-Runs all standard tests (31 tests, ~25 seconds).
 
-**Performance Tests:**
+Iceberg integration tests run against an in-process Hadoop catalog and don't require
+Docker.
+
+## Documentation
+
+- [Getting Started](./docs/getting-started.md) — the three connector shapes
+  (`HttpExtract.fullPull`, `HttpExtract`, `HttpSlice`) walked through as small sets of
+  questions
+- [Configuration](./docs/configuration.md) — `EXLO_*` environment variables
+- [Local Development](./docs/local-development.md) — run a connector locally
+- [Integration Testing](./docs/integration-testing.md)
+
+For framework internals, see `/context/DEVELOPER_GUIDE.md` and `/context/CONFIG.md`.
+
+## Quick start
+
+Run the pokeapi example with a logging destination (no AWS, no Iceberg):
+
 ```bash
-sbt exlo/perf:test
+EXLO_STREAM=kalos sbt 'examples/runMain examples.pokeapi.PokeApiApp'
 ```
-Runs performance/throughput benchmarks (3 tests, ~30 seconds). These tests:
-- Measure throughput with 10K, 100K, and 50K records
-- Verify memory efficiency under load
-- Compare different checkpoint interval strategies
-- Use real Docker containers (Nessie + MinIO)
 
-Performance tests are in `exlo/src/perf` and run separately to keep regular test runs fast.
+Switch to a local Iceberg warehouse:
 
-For more information on the sbt-dotty plugin, see the
-[scala3-example-project](https://github.com/scala/scala3-example-project/blob/main/README.md).
+```bash
+EXLO_DESTINATION=iceberg \
+EXLO_CATALOG_TYPE=hadoop \
+EXLO_CATALOG_WAREHOUSE=/tmp/exlo-warehouse \
+EXLO_TABLE_NAMESPACE=exlo \
+EXLO_TABLE_NAME=pokeapi_kalos \
+EXLO_STREAM=kalos \
+sbt 'examples/runMain examples.pokeapi.PokeApiApp'
+```

@@ -1,60 +1,97 @@
 # Configuration
 
-EXLO configuration via environment variables.
+exlo is configured entirely through `EXLO_*` environment variables — no per-environment
+code changes. The full reference lives at `/context/CONFIG.md`; this page is the quick
+tour.
 
-## Required Variables
+## Always required
 
-### Storage
-- `EXLO_STORAGE_WAREHOUSE_PATH` - S3/GCS path
-- `EXLO_STORAGE_BACKEND` - `S3`, `GCS`, `AZURE`, `LOCAL`
+| Variable | Example | Notes |
+|---|---|---|
+| `EXLO_STREAM` | `kalos` | Selects which stream to run from the connector's `StreamRegistry`. Required even for single-stream apps. |
 
-### Catalog
-- `EXLO_STORAGE_CATALOG` - `NESSIE`, `GLUE`, `HIVE`, `JDBC`, `DATABRICKS`
+## Destination
 
-### Stream
-- `EXLO_STREAM_NAMESPACE` - Iceberg namespace (e.g., `raw`)
-- `EXLO_STREAM_TABLE_NAME` - Table name
+| Variable | Example | Notes |
+|---|---|---|
+| `EXLO_DESTINATION` | `iceberg` | `logging` (default — INFO logs only) or `iceberg` (durable) |
 
-### State
-- `EXLO_SYNC_STATE_VERSION` - Increment to force fresh start
+When `EXLO_DESTINATION=iceberg`, also set:
 
-## Backend-Specific
+| Variable | Example | Notes |
+|---|---|---|
+| `EXLO_CATALOG_TYPE` | `s3tables` | `s3tables`, `glue`, or `hadoop` |
+| `EXLO_CATALOG_WAREHOUSE` | `arn:aws:s3tables:...` / `s3://lake/warehouse` / `/tmp/wh` | Table-bucket ARN, S3 path, or local FS path |
+| `EXLO_CATALOG_REGION` | `us-east-1` | Required for `s3tables`; optional for `glue`; ignored for `hadoop` |
+| `EXLO_TABLE_NAMESPACE` | `exlo` | Iceberg namespace |
+| `EXLO_TABLE_NAME` | `pokeapi_kalos` | Iceberg table name |
 
-### S3
+## Sink tuning (optional)
+
+| Variable | Default | Notes |
+|---|---|---|
+| `EXLO_SINK_MAX_RECORDS` | `1000` | Flush after N records |
+| `EXLO_SINK_MAX_INTERVAL` | `PT30S` | Flush after this duration (ISO-8601) |
+| `EXLO_SINK_BUFFER_CAPACITY` | `10000` | Bounded TQueue size |
+
+## Common recipes
+
+**Logging destination (dev):**
 ```bash
-EXLO_STORAGE_BACKEND_S3_REGION="us-east-1"
-EXLO_STORAGE_BACKEND_S3_ENDPOINT="http://localhost:9000"  # Optional
+EXLO_STREAM=kalos sbt 'examples/runMain examples.pokeapi.PokeApiApp'
 ```
 
-### Nessie Catalog
+**Local Iceberg (no AWS):**
 ```bash
-EXLO_STORAGE_CATALOG_NESSIE_URI="http://localhost:19120/api/v1"
-EXLO_STORAGE_CATALOG_NESSIE_REF="main"  # Optional
+EXLO_DESTINATION=iceberg \
+EXLO_CATALOG_TYPE=hadoop \
+EXLO_CATALOG_WAREHOUSE=/tmp/exlo-warehouse \
+EXLO_TABLE_NAMESPACE=exlo \
+EXLO_TABLE_NAME=pokeapi_kalos \
+EXLO_STREAM=kalos \
+sbt 'examples/runMain examples.pokeapi.PokeApiApp'
 ```
 
-## Local Development
+**AWS S3 Tables (managed Iceberg):**
+```bash
+EXLO_DESTINATION=iceberg \
+EXLO_CATALOG_TYPE=s3tables \
+EXLO_CATALOG_WAREHOUSE=arn:aws:s3tables:us-east-1:123456789012:bucket/my-table-bucket \
+EXLO_CATALOG_REGION=us-east-1 \
+EXLO_TABLE_NAMESPACE=exlo \
+EXLO_TABLE_NAME=pokeapi_kalos \
+EXLO_STREAM=kalos \
+sbt 'examples/runMain examples.pokeapi.PokeApiApp'
+```
 
-See: `/docs/local-development.md`
+**AWS Glue + S3:**
+```bash
+EXLO_DESTINATION=iceberg \
+EXLO_CATALOG_TYPE=glue \
+EXLO_CATALOG_WAREHOUSE=s3://my-data-lake/warehouse \
+EXLO_TABLE_NAMESPACE=exlo \
+EXLO_TABLE_NAME=pokeapi_kalos \
+EXLO_STREAM=kalos \
+AWS_REGION=us-east-1 \
+sbt 'examples/runMain examples.pokeapi.PokeApiApp'
+```
 
-## Custom Connector Config
+## Connector-specific config
 
-Use `zio-config` for your own configuration:
+For your own config (API keys, endpoints, etc.) use ZIO Config under your own namespace:
 
 ```scala
-case class MyConfig(apiKey: String, endpoint: String)
-
-object MyConfig:
-  val config = deriveConfig[MyConfig].nested("myconnector")
-  val layer = ZLayer.fromZIO(ZIO.config(config))
+final case class MyApiConfig(apiKey: String, baseUrl: String)
+object MyApiConfig:
+  val config = deriveConfig[MyApiConfig].nested("myapi")
+  val layer  = ZLayer.fromZIO(ZIO.config(config))
 ```
 
-Set via environment:
-```bash
-MYCONNECTOR_API_KEY="sk_test_123"
-MYCONNECTOR_ENDPOINT="https://api.example.com"
-```
+Set with `MYAPI_API_KEY=...` / `MYAPI_BASE_URL=...`. Provide the layer alongside
+`Client.default` when you call `Exlo.run(...).provide(...)`.
 
 ## Related
 
 - [Local Development](./local-development.md)
-- Full config reference: `/context/CONFIGURATION.md`
+- [Integration Testing](./integration-testing.md)
+- Full reference: `/context/CONFIG.md`
