@@ -19,11 +19,16 @@ import java.util.concurrent.TimeoutException
  *     also flow through the retry schedule. Use for 5xx, 429, etc.
  *
  * **Default retry.** `retrySchedule` defaults to a small jittered exponential backoff
- * (3 retries, ~1s/2s/4s with jitter), gated to *transient network-class* throwables only:
- * `IOException` (covers connection resets, DNS blips), Netty's
- * `PrematureChannelClosureException` (load balancer / NAT closes a pooled connection mid
- * in-flight request), and `TimeoutException`. App-level errors (decoding, schema mismatch)
- * fail fast — we only retry the things that are physically transient.
+ * (3 retries, ~1s/2s/4s with jitter), gated to two failure classes:
+ *   - *Transient network-class* throwables — `IOException` (connection resets, DNS blips),
+ *     Netty's `PrematureChannelClosureException` (LB / NAT closes a pooled connection
+ *     mid-flight), `TimeoutException`. Always safe to retry under any HTTP verb.
+ *   - Responses lifted via [[withRetryOnStatus]] (e.g. 429, 5xx). Opting into
+ *     `retryOnStatus(...)` is the connector author's signal that those statuses ARE
+ *     retryable for this endpoint, so the default schedule honors them with backoff.
+ *
+ * App-level errors (decoding, schema mismatch) fail fast — we only retry the things the
+ * framework or the connector author has explicitly classified as retryable.
  *
  * Why narrow rather than blanket-retry: the framework accepts any HTTP verb (GraphQL
  * sources will use POST), so we can't assume idempotence at the application level. But
@@ -31,16 +36,13 @@ import java.util.concurrent.TimeoutException
  * reached the server, or the response was lost — and exlo's downstream is dedup-tolerant
  * (at-least-once is the contract).
  *
- * Connector authors override per-stream via `.retry(customSchedule)`.
+ * Connector authors override per-stream via `.retry(customSchedule)`. Note: the default
+ * does NOT honor a `Retry-After` header — exponential backoff only. Providers that need
+ * server-pacing should pass a custom schedule.
  */
 private[http] final case class HttpExecConfig(
     headers: Chunk[Header] = Chunk.empty,
-    retrySchedule: Option[Schedule[Any, Throwable, Any]] =
-      Some(
-        (Schedule.recurWhile[Throwable](HttpExec.isTransient)
-          && Schedule.exponential(1.second)
-          && Schedule.recurs(3)).jittered
-      ),
+    retrySchedule: Option[Schedule[Any, Throwable, Any]] = Some(HttpExec.defaultRetrySchedule),
     retryOnStatus: Option[Status => Boolean] = None,
     oauthFlow: Option[OAuthFlow] = None
 ):
@@ -70,6 +72,24 @@ private[http] object HttpExec:
 
   /** Marker error used to lift a "retryable" response into the failure channel for `retry`. */
   private final case class RetryableResponse(response: Response) extends Throwable
+
+  /**
+   * Default retry gate: transient network errors plus any response the connector author
+   * lifted into the failure channel via `retryOnStatus`. The latter is the only path that
+   * produces `RetryableResponse`, so accepting it here is what makes `retryOnStatus(429)`
+   * actually backoff under the default schedule.
+   */
+  private def isDefaultRetryable(t: Throwable): Boolean =
+    isTransient(t) || t.isInstanceOf[RetryableResponse]
+
+  /**
+   * Default retry schedule. ~1s / 2s / 4s with jitter, capped at 3 retries, gated to
+   * [[isDefaultRetryable]]. Built once and shared across all `HttpExecConfig` defaults.
+   */
+  val defaultRetrySchedule: Schedule[Any, Throwable, Any] =
+    (Schedule.recurWhile[Throwable](isDefaultRetryable)
+      && Schedule.exponential(1.second)
+      && Schedule.recurs(3)).jittered
 
   /**
    * Execute a single request with the given config and an optional `TokenManager`.

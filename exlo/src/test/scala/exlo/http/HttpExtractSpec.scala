@@ -113,6 +113,42 @@ object HttpExtractSpec extends ZIOSpecDefault:
         n   <- counter.get
       yield assertTrue(all == Chunk("finally"), n == 3)
     }.provide(TestClient.layer),
+    test("retryOnStatus with the DEFAULT schedule retries 429 with backoff") {
+      // Regression: previously, the default schedule's `recurWhile(isTransient)` gate
+      // excluded `RetryableResponse`, so .retryOnStatus(_ == 429) silently became a
+      // no-op — the framework returned the 429 to the parser, which then crashed.
+      val rateLimited = HttpExtract[State]
+        .request(_ => Request.get(URL.decode("http://test.invalid/rate").toOption.get))
+        .parse(parsePage)
+        .records(p => Chunk.fromIterable(p.records))
+        .advance((s, _) => s)
+        .retryOnStatus(_ == Status.TooManyRequests)
+        // No .retry() override — relies on HttpExec.defaultRetrySchedule (1s/2s/4s).
+        .toConnector("rate_limited", "0.1.0")
+
+      for
+        dest    <- Destination.InMemory.make[State]
+        counter <- Ref.make(0)
+        flakyRoute = Routes(
+          Method.GET / "rate" -> handler { (_: Request) =>
+            counter.updateAndGet(_ + 1).map { n =>
+              if n < 3 then Response.status(Status.TooManyRequests)
+              else Response.json("""{"records":["finally"],"next":null}""")
+            }
+          }
+        )
+        _        <- TestClient.addRoutes(flakyRoute)
+        runFiber <- Exlo
+                      .run(rateLimited, State(1), SinkConfig.testing)
+                      .provideSome[Client](ZLayer.succeed[Destination[State]](dest) ++ Telemetry.noop)
+                      .fork
+        // Default schedule waits ~1s, then ~2s. Adjust generously to cover jitter.
+        _   <- TestClock.adjust(20.seconds)
+        _   <- runFiber.join
+        all <- dest.allRecords
+        n   <- counter.get
+      yield assertTrue(all == Chunk("finally"), n == 3)
+    }.provide(TestClient.layer),
     test("recover: matched error mutates state and re-issues request from new state") {
       // Models the poison-pill case: the first request to ?page=1 fails with a
       // PoisonError. The recover handler narrows state (page=2). On re-entry, the next
