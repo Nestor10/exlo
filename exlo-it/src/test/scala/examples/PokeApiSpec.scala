@@ -5,7 +5,7 @@ import exlo.http.{HttpExec, HttpResponse, HttpStream}
 import exlo.http.HttpResponse.field
 import exlo.runtime.{DataSink, FlushPolicy, Runner, StateStore}
 import zio.*
-import zio.http.{Request, URL}
+import zio.http.Request
 import zio.json.*
 import zio.json.ast.Json
 import zio.test.*
@@ -26,19 +26,19 @@ object PokeApiSpec extends ZIOSpecDefault:
    * HttpExloApp` with a hardcoded `pokeapi.co` URL. The litmus value is
    * how short and obvious it reads.
    */
-  object PokeStream extends HttpStream:
+  object PokeStream extends HttpStream[Unit, String]:
     val name = "pokemon"
 
-    def request(s: Map[String, String], c: Map[String, String]): Request =
+    def request(p: Unit, s: Map[String, String], c: Map[String, String]): Request =
       HttpExec.get(c.getOrElse("next", "https://pokeapi.co/api/v2/pokemon?offset=0"))
 
-    def records(s: Map[String, String], c: Map[String, String], r: HttpResponse): Chunk[String] =
+    def records(p: Unit, s: Map[String, String], c: Map[String, String], r: HttpResponse): Chunk[String] =
       r.json.field("results")
         .flatMap(_.asArray)
         .getOrElse(Chunk.empty)
         .map(_.toJson)
 
-    def nextCtx(s: Map[String, String], c: Map[String, String], r: HttpResponse): Option[Map[String, String]] =
+    def nextCtx(p: Unit, s: Map[String, String], c: Map[String, String], r: HttpResponse): Option[Map[String, String]] =
       r.json.field("next").flatMap(_.asString).map(url => Map("next" -> url))
 
   /** Two-page fake: offset=0 → 2 records + next URL; offset=2 → 1 record + null. */
@@ -68,7 +68,7 @@ object PokeApiSpec extends ZIOSpecDefault:
           sink  <- DataSink.InMemory.make
           store <- StateStore.InMemory.make
           _     <- Runner.run(
-                     PokeStream.asConnector("pokeapi", "1.0.0"),
+                     PokeStream.asStage("pokeapi", "1.0.0"),
                      "pokemon", "test-sync",
                      sink, store,
                      FlushPolicy(maxRows = 100, maxInterval = 100.millis)

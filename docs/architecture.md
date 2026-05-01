@@ -1,18 +1,17 @@
 # exlo architecture
 
-The framework is plumbing. Connectors describe what to emit and how to
-resume; the runner moves bytes to storage and persists progress; substrate
-adapters (S3 today; future: Kafka, Postgres, …) implement the storage
-contracts. Record content is **never** a framework concern — records on
-the wire are opaque `String`.
+The framework is plumbing. Stages describe what to emit and how to resume;
+the runner moves bytes to storage and persists progress; substrate adapters
+(S3 today; future: Kafka, Postgres, …) implement the storage contracts.
+Record content at the leaf boundary is **never** a framework concern —
+records that hit a `DataSink` are opaque `String`.
 
 ## Package layout
 
 ```
 exlo.domain                  pure types — no infrastructure
-  Tag                        phantom marker for connector outputs
-  Emission[+S]               Record(String) | Mark[S]
-  Connector[+O <: Tag, S, -R]
+  Stage[-I, +O, S, -R]       a node in the pipeline
+  Emission[+O, +S]           Record(O) | Mark(S)
   ExloError                  sealed effect-channel error type
 
 exlo.runtime                 framework primitives
@@ -22,14 +21,12 @@ exlo.runtime                 framework primitives
   WatermarkTracker[S]        admit / advance, releases pending marks
   FlushPolicy                maxRows + maxInterval
   SyncMode                   Incremental | FullSync — runtime config flag
-  Source[T <: Tag]           env service for parent records
-  FedBy                      ZLayer wiring a parent connector as a Source
   Runner                     the orchestration loop
   RunContext                 FiberRefs for syncId / connectorId / streamName
   Telemetry                  OTel tracer layers (live / noop / auto)
 
 exlo.http                    high-ergonomics HTTP DSL — uses runtime
-  HttpStream                 per-stream primitives + Connector adapter
+  HttpStream[-Parent, +Out]  per-stream primitives + Stage adapter
   HttpExec                   service trait + live impl + helpers
   HttpResponse               pre-parsed JSON; field/asString/asArray ext
 
@@ -40,8 +37,8 @@ exlo.s3                      substrate adapter — uses runtime
   S3                         S3AsyncClient ZLayer
 
 exlo                         top-level wiring
-  Exlo.run                   low-level entry point — any Connector
-  HttpExloApp                ZIOAppDefault for an HttpStream-based connector
+  Exlo.run                   single-stage entry point — any Stage[Unit, String, …]
+  HttpExloApp                ZIOAppDefault for HttpStream-based connectors
 ```
 
 Dependency direction is one-way: `domain` ← `runtime` ← `http`/`s3` ← `exlo`.
@@ -52,43 +49,51 @@ substrate. Adding `exlo.kafka.*` or `exlo.postgres.*` doesn't touch
 ## Two tiers for connector authors
 
 **High tier — `HttpExloApp` + `HttpStream`.** For HTTP-based sources
-(typical case). Author defines a `List[HttpStream]`, each stream has four
-primitives. State and ctx are `Map[String, String]` — no type parameters,
-no auxiliary case classes. See [The HTTP layer](#the-http-layer) below.
+(typical case). Author defines a `List[HttpStream[Unit, String]]`, each
+stream has four primitives. State and ctx are `Map[String, String]` — no
+type parameters, no auxiliary case classes. See [The HTTP
+layer](#the-http-layer) below.
 
-**Low tier — `Connector[O, S, R]`.** Direct trait implementation. Use
-when the source isn't HTTP, or when you need fine control: typed `S`,
+**Low tier — `Stage[I, O, S, R]`.** Direct trait implementation. Use
+when the source isn't HTTP, or when you need fine control: typed `I`/`O`,
 custom `Codec`, custom env. See [The core primitives](#the-core-primitives).
 
 ## The core primitives
 
-A connector is a value, not a service:
+A stage is a value, not a service:
 
 ```scala
-trait Connector[+O <: Tag, S, -R]:
+trait Stage[-I, +O, S, -R]:
   def id: String
   def version: String
   def initialState: S
   def reduce(prev: S, next: S): S
   def codec: Codec[S]
-  def dataStream(resume: S): ZStream[R, ExloError, Emission[S]]
+  def run(input: ZStream[Any, ExloError, I], resume: S): ZStream[R, ExloError, Emission[O, S]]
 ```
 
-- `O` — phantom output tag for `Source[T]` disambiguation in parent-child
-  flows. Use the upper bound `Tag` for leaf connectors not consumed via
-  `FedBy`.
+- `I` — input record type. Roots have `I = Unit` (the runner feeds a
+  single-element kick-off stream). Inner/leaf stages have `I` equal to
+  the upstream stage's `O`.
+- `O` — output record type. Inter-stage flows can carry any user type;
+  the leaf stage that writes to a `DataSink` must have `O = String`.
 - `S` — state shape. `reduce` is a left-fold semigroup over `S` (must be
   associative under left-fold — marks arrive in seq order).
-- `R` — env requirement. The runner calls `dataStream(resume)` once and
+- `R` — env requirement. The runner calls `run(input, resume)` once and
   drives the resulting `ZStream` to completion.
 
-Test by `runCollect`-ing the stream against synthetic state and asserting
-the sequence.
+Composition is plain `ZStream` piping: pull `Record`s out of the upstream
+stage's emission stream, feed them to the next stage's input. The runner
+side-effects each stage's `Mark`s into that stage's watermark tracker and
+StateStore.
+
+Test by `runCollect`-ing the stream against a synthetic input and resume
+and asserting the sequence.
 
 ## Runner pipeline
 
 ```
-connector.dataStream(resume)
+stage.run(ZStream.succeed(()), resume)
   .mapZIO {
     case Record(s) => Sequenced(seq++, s)            // forward to sink
     case Mark(st)  => watermark.admit(Pending(curSeq, st)).as(None)  // hold
@@ -109,6 +114,12 @@ once `dataSink.write` returns; only then do the corresponding marks
 commit state. Crash mid-flush drops the in-flight buffer (those records
 were never durable, so their state can't release — at-least-once).
 
+This is the single-stage / leaf entry point. Multi-stage chaining
+helpers will land alongside the first connector that needs them; the
+shape will be: walk a list of stages front-to-back, tap each stage's
+emission stream to (a) pipe `Record`s into the next stage and (b)
+side-effect `Mark`s into that stage's commit machinery.
+
 ## Watermark-gated state commits
 
 A Mark says: *"if every Record I emitted before me is durable, then this
@@ -118,7 +129,7 @@ the `WatermarkTracker` and stays pending until `dataSink.write` reports a
 `durableSeq` that crosses it.
 
 When marks release, they're folded together (left-fold under
-`connector.reduce`), then merged with prior committed state via
+`stage.reduce`), then merged with prior committed state via
 read-reduce-write:
 
 ```
@@ -176,32 +187,43 @@ extractable endpoint within that source (Zendesk's `tickets`,
 `ticket_metrics`, `kalos`). Each runtime invocation runs ONE stream,
 selected via `EXLO_STREAM` env var.
 
-### `HttpStream` — per-stream primitives
+### `HttpStream[-Parent, +Out]` — per-stream primitives
 
 ```scala
-trait HttpStream:
+trait HttpStream[-Parent, +Out]:
   def name:         String
   def syncMode:     SyncMode             = SyncMode.Incremental
   def initialState: Map[String, String]  = Map.empty
   def initialCtx:   Map[String, String]  = Map.empty
 
-  def request(state: Map, ctx: Map): Request
-  def records(state: Map, ctx: Map, r: HttpResponse): Chunk[String]
-  def nextCtx(state: Map, ctx: Map, r: HttpResponse): Option[Map]
-  def nextState(state: Map, ctx: Map, r: HttpResponse): Option[Map] = None
+  def request(parent: Parent, state: Map, ctx: Map): Request
+  def records(parent: Parent, state: Map, ctx: Map, r: HttpResponse): Chunk[Out]
+  def nextCtx(parent: Parent, state: Map, ctx: Map, r: HttpResponse): Option[Map]
+  def nextState(parent: Parent, state: Map, ctx: Map, r: HttpResponse): Option[Map] = None
 ```
 
-State and ctx are both `Map[String, String]` — no type parameters, no
-codecs to derive. The persistence boundary is in the data layer:
+Type parameters:
+
+- `Parent` — the upstream stage's record type. `Unit` for root streams
+  (no parent).
+- `Out` — the record type this stream emits. Leaf streams that write to
+  a `DataSink` use `Out = String`. Inner streams can emit any user type
+  the next stage consumes.
+
+State and ctx are both `Map[String, String]`. The persistence boundary
+is in the data layer:
 
 - **`state`** — persisted across runs. `nextState` returning `Some` emits
   a Mark that the runner commits to StateStore.
 - **`ctx`** — ephemeral within a run. Lives in a `Ref` for the duration
   of the run; discarded at end.
 
-`nextCtx` returning `None` ends the run (no more pages). `nextState`
-returning `None` (default) means no advance for this page — most
-full-refresh connectors never override it.
+For each parent record, the stream runs an inner walker: while
+`nextCtx` returns `Some`, build the next request and iterate. State is
+shared across parent records via an internal `Ref`, so a Mark from
+parent A is visible to the next iteration over parent B. `nextCtx`
+returning `None` ends the per-parent walk; the stream then advances to
+the next parent record (if any).
 
 ### `HttpResponse` — pre-parsed
 
@@ -234,14 +256,14 @@ object HttpExec:
 
 Service trait so tests can inject a fake (returns canned responses by
 URL) without spinning up a real `zio.http.Server`. The `HttpStream` →
-`Connector` adapter declares `R = HttpExec`; production wires
-`HttpExec.live` over `Client.default`, tests provide a `ZLayer.succeed`
-of a fake.
+`Stage` adapter declares `R = HttpExec`; production wires `HttpExec.live`
+over `Client.default`, tests provide a `ZLayer.succeed` of a fake.
 
 First-pass `live` includes only transient retry (IOException,
 TimeoutException — 3 retries, 1s/2s/4s with jitter). Auth (`OAuth`),
 status-class retry (`retryOnStatus`), and rate-limit are deferred —
-each will land as a decorator on `HttpExec.live`.
+each will land as a decorator on `HttpExec.live`, or as a `ZPipeline`
+composing into the stage chain.
 
 ### `HttpExloApp` — ZIOAppDefault
 
@@ -250,13 +272,18 @@ trait HttpExloApp extends ZIOAppDefault:
   def id:        String
   def version:   String      = "1.0.0"
   def s3Config:  S3Config
-  def streams:   List[HttpStream]   // one or many; runtime picks via EXLO_STREAM
+  def streams:   List[HttpStream[Unit, String]]   // one or many; runtime picks via EXLO_STREAM
 ```
 
 The trait owns nothing about HTTP itself — primitives live on
 `HttpStream`. It only adds connector identity, the canonical layer set
 (`S3DataSink`, `S3StateStore`, `S3`, `Client`, `HttpExec.live`,
 `Telemetry.auto`), and `EXLO_STREAM`-based dispatch.
+
+Single-stream-shape only today: every entry in `streams` is a root
+stream (`Parent = Unit`) emitting `String` records to the DataSink.
+Multi-stage connectors with parent/child wiring will use a different
+entry point that composes a chain of `Stage`s.
 
 ### `SyncMode` — runtime config flag
 
@@ -284,16 +311,16 @@ object PokeApi extends HttpExloApp:
   val s3Config = S3Config(bucket = "my-data")
 
   val streams = List(
-    new HttpStream:
+    new HttpStream[Unit, String]:
       val name = "pokemon"
 
-      def request(s, c) =
+      def request(p: Unit, s: Map[String, String], c: Map[String, String]) =
         HttpExec.get(c.getOrElse("next", "https://pokeapi.co/api/v2/pokemon?offset=0"))
 
-      def records(s, c, r) =
+      def records(p: Unit, s: Map[String, String], c: Map[String, String], r: HttpResponse) =
         r.json.field("results").flatMap(_.asArray).getOrElse(Chunk.empty).map(_.toJson)
 
-      def nextCtx(s, c, r) =
+      def nextCtx(p: Unit, s: Map[String, String], c: Map[String, String], r: HttpResponse) =
         r.json.field("next").flatMap(_.asString).map(url => Map("next" -> url))
   )
 ```
@@ -305,7 +332,7 @@ run paginates from `?offset=0` to exhaustion.
 For an incremental connector, override `nextState`:
 
 ```scala
-override def nextState(s, c, r) =
+override def nextState(p, s, c, r) =
   r.json.field("issues").flatMap(_.asArray).flatMap(_.lastOption)
     .flatMap(_.field("updated_at")).flatMap(_.asString)
     .map(ts => Map("since" -> ts))
@@ -314,31 +341,38 @@ override def nextState(s, c, r) =
 Each page's last record's timestamp becomes the new resume cursor; the
 runner persists it after the page is durable.
 
-## Source / FedBy (parent-child)
+## Multi-stage composition (open work)
 
-A child connector that consumes a parent's records declares
-`Source[ParentTag]` in its env:
+Every multi-stream HTTP connector is a small DAG of stages:
+list-and-detail (queries → mentions, issues → comments), tree-walk,
+fan-in. The model is plain `ZStream` piping plus per-stage state commits;
+no `Source[T]` env services, no FedBy ZLayer indirection.
+
+Sketched shape, pending the first connector:
 
 ```scala
-trait UsersTag extends Tag
+// In a connector that owns both stages:
+val queries:  Stage[Unit,  Query, QState, HttpExec] = ...
+val mentions: Stage[Query, String, MState, HttpExec] = ...
 
-class OrdersConnector extends Connector[OrdersOutTag, OrdersState, Source[UsersTag] & HttpClient]:
-  def dataStream(resume) =
-    ZStream.serviceWithStream[Source[UsersTag]](_.stream).mapZIO(fetchOrders)
+// The Runner.runChain (TBD) walks this list, piping records and
+// side-effecting marks per-stage:
+Runner.runChain(queries, mentions, ...)
 ```
 
-`FedBy(usersConnector)` produces a `ZLayer[Rp, ExloError, Source[UsersTag]]`
-that runs the parent inside a forked scope and pipes its records through
-a bounded queue feeding the child. Multi-parent: stack `FedBy` layers;
-each distinct phantom tag becomes a distinct `Source[T]` service in the
-env. ZIO's layer memoization gives free fan-out — one parent runner
-shared across multiple children.
+Open questions — to be settled by brandwatch:
 
-**v1 caveats — not yet validated by a real connector.** Parents in
-`FedBy` mode use an internal `NoopStateStore` and always cold-start (the
-queue is volatile, so committing parent state would over-claim
-durability). Suitable for parents cheap to re-enumerate; persistent-tail
-`Source` impls for incremental parents come later.
+- **Intermediate-stage state semantics.** Leaf state commits are
+  watermark-gated against `DataSink.write`. Intermediate stages have no
+  durable boundary downstream. Two reasonable answers: commit eagerly
+  (at-most-once relative to downstream durability), or thread a
+  cross-stage watermark. Eager is simpler; brandwatch's `queries`
+  doesn't need state at all so it punts the question.
+- **Parallelism within a stage.** brandwatch's `mentions` is naturally
+  parallel by `(queryId, window)`. ZPipeline gives us `mapZIOPar(n)` for
+  free; the question is where it belongs in the API.
+- **The `HttpExloApp` shape for chains.** `streams: List[HttpStream[Unit,
+  String]]` only handles roots. A chain-aware variant is needed.
 
 ## The exlo envelope
 
@@ -354,8 +388,8 @@ Each line of a JSONL+gzip data file written by `S3DataSink`:
 
 - `_exlo_ab_id` — UUIDv4 per record.
 - `_exlo_emitted_at` — epoch milliseconds (sink-side wall clock).
-- `_exlo_data` — the connector's record string parsed as JSON; falls
-  back to a JSON string literal if the record isn't valid JSON.
+- `_exlo_data` — the stage's record string parsed as JSON; falls back to
+  a JSON string literal if the record isn't valid JSON.
 
 Naming follows Airbyte's `_airbyte_*` convention so downstream tools
 that already grok that pattern can plug in with one regex change.
@@ -377,12 +411,12 @@ object MyConnector extends HttpExloApp:
 
 ```scala
 object MyApp extends ZIOAppDefault:
-  def run = Exlo.run(myConnector, "stream-name").provide(
+  def run = Exlo.run(myStage, "stream-name").provide(
     S3DataSink.layer(s3Config),
     S3StateStore.layer(s3Config),
     S3.layer(s3Config),
     Telemetry.auto,
-    MyService.layer  // the connector's R
+    MyService.layer  // the stage's R
   )
 ```
 
@@ -392,22 +426,19 @@ tracer span, annotates ZIO logs, and delegates to `Runner.run`.
 
 ## Validation status
 
-- 50 unit tests + 9 integration tests, 0 failures.
+- 47 unit tests + integration tests, 0 failures.
 - Core primitives, `Runner`, `WatermarkTracker`, `FlushPolicy`, `Codec`,
-  `StateStore.InMemory`, `DataSink.InMemory`, `Source`/`FedBy` smoke —
-  unit tests in `exlo`.
+  `StateStore.InMemory`, `DataSink.InMemory` — unit tests in `exlo`.
 - `S3DataSink` end-to-end against MinIO; `S3StateStore` round-trips +
   20-fiber concurrent-merge contention test — integration tests in
   `exlo-it`.
 - `HttpStream` shape validated by `PokeApiSpec` (litmus) running the full
-  runner pipeline against a fake `HttpExec` — 232ms.
+  runner pipeline against a fake `HttpExec`.
 
 ## Not yet validated
 
 - **Live HTTP smoke** — `HttpExec.live` against a real API end-to-end.
-- **Multi-stream connector** — `streams: List[HttpStream]` with shared
-  auth/baseUrl. Zendesk-style rebuild is the planned litmus.
-- **`FedBy` with a real connector** — only the layer-composition smoke
-  test exists.
-- **Auth / status-retry / rate-limit** — deferred from the deleted code;
-  port as decorators on `HttpExec.live`.
+- **Multi-stage chaining** — `Runner.runChain` and friends. The planned
+  brandwatch port is the first real exercise.
+- **Auth / status-retry / rate-limit** — port from the deleted code as
+  decorators on `HttpExec.live` or as `ZPipeline` stages.

@@ -1,6 +1,6 @@
 package exlo
 
-import exlo.domain.{Connector, Emission, ExloError, Tag}
+import exlo.domain.{Emission, ExloError, Stage}
 import exlo.runtime.{Codec, DataSink, FlushPolicy, RunContext, StateStore}
 import zio.*
 import zio.stream.ZStream
@@ -8,16 +8,17 @@ import zio.test.*
 
 object ExloSpec extends ZIOSpecDefault:
 
-  private trait OutTag extends Tag
-
-  private def conn(emissions: ZStream[Any, ExloError, Emission[Long]]): Connector[OutTag, Long, Any] =
-    new Connector[OutTag, Long, Any]:
+  private def stage(emissions: ZStream[Any, ExloError, Emission[String, Long]]): Stage[Unit, String, Long, Any] =
+    new Stage[Unit, String, Long, Any]:
       val id           = "smoke"
       val version      = "1.0.0"
       val initialState = 0L
       def reduce(a: Long, b: Long): Long = a max b
       val codec        = Codec.long
-      def dataStream(resume: Long): ZStream[Any, ExloError, Emission[Long]] = emissions
+      def run(
+          input:  ZStream[Any, ExloError, Unit],
+          resume: Long
+      ): ZStream[Any, ExloError, Emission[String, Long]] = emissions
 
   private val fastFlush = FlushPolicy(maxRows = 100, maxInterval = 100.millis)
 
@@ -31,7 +32,7 @@ object ExloSpec extends ZIOSpecDefault:
       for
         sinkRef  <- DataSink.InMemory.make
         storeRef <- StateStore.InMemory.make
-        // Capture FiberRef values inside a tap on the connector's stream.
+        // Capture FiberRef values inside a tap on the stage's stream.
         observed <- Ref.make(("", "", "", ""))
         captured  = ZStream.fromZIO {
                       for
@@ -42,7 +43,7 @@ object ExloSpec extends ZIOSpecDefault:
                         _    <- observed.set((sId, cId, cVer, sn))
                       yield ()
                     }.drain ++ emissions
-        _        <- Exlo.run(conn(captured), "smoke-stream", fastFlush)
+        _        <- Exlo.run(stage(captured), "smoke-stream", fastFlush)
                       .provide(
                         ZLayer.succeed[DataSink](sinkRef),
                         ZLayer.succeed[StateStore](storeRef),

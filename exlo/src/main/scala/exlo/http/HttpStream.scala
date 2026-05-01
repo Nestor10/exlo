@@ -1,6 +1,6 @@
 package exlo.http
 
-import exlo.domain.{Connector, Emission, ExloError, Tag}
+import exlo.domain.{Emission, ExloError, Stage}
 import exlo.runtime.{Codec, SyncMode}
 import zio.*
 import zio.http.Request
@@ -15,15 +15,31 @@ import zio.stream.ZStream
  *
  * Owns the four user-defined primitives (`request`, `records`, `nextCtx`,
  * `nextState`), the persistence-vs-ephemeral split between `state` and
- * `ctx`, and the adapter from those into a generic [[Connector]] the
- * runner can drive.
+ * `ctx`, and the adapter from those into a generic [[Stage]] the runner can
+ * drive.
  *
- *   - `nextCtx` returns the bag the *next request in this run* should see;
- *     discarded at end of run.
+ * Type parameters:
+ *
+ *   - `Parent`: the upstream stage's record type. Use `Unit` for root
+ *     streams (no parent).
+ *   - `Out`: the record type this stream emits. Leaf streams that write to
+ *     a `DataSink` must have `Out = String` (opaque text). Inner streams
+ *     can emit any user type that the next stage consumes.
+ *
+ * For each parent record, the stream runs an inner walker over `(state,
+ * ctx)`:
+ *
+ *   - `nextCtx` returns the bag the *next iteration in this run* should
+ *     see; `None` ends the per-parent walk and the stream advances to the
+ *     next parent record (if any).
  *   - `nextState` returns the bag *future runs* should see (when
- *     `syncMode = Incremental`). Default: `None` — connector never persists.
+ *     `syncMode = Incremental`). Default: `None` — never persists.
+ *
+ * State is shared across all parent records within a run: each Mark updates
+ * an internal Ref that subsequent iterations (including those triggered by
+ * later parent records) read on the next request.
  */
-trait HttpStream:
+trait HttpStream[-Parent, +Out]:
 
   // ---------- identity ----------
   def name: String
@@ -36,63 +52,72 @@ trait HttpStream:
   def initialCtx:   Map[String, String] = Map.empty
 
   // ---------- primitives ----------
-  def request(state: Map[String, String], ctx: Map[String, String]): Request
+  def request(parent: Parent, state: Map[String, String], ctx: Map[String, String]): Request
 
-  def records(state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Chunk[String]
+  def records(parent: Parent, state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Chunk[Out]
 
-  /** Some(c) = next request uses ctx `c`; None = stream is done. */
-  def nextCtx(state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Option[Map[String, String]]
+  /** Some(c) = next iteration uses ctx `c`; None = walk for this parent is done. */
+  def nextCtx(parent: Parent, state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Option[Map[String, String]]
 
   /** Some(s) = persist new state (Mark emitted); None = no state advance. */
-  def nextState(state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Option[Map[String, String]] = None
+  def nextState(parent: Parent, state: Map[String, String], ctx: Map[String, String], r: HttpResponse): Option[Map[String, String]] = None
 
-  // ---------- adapter to Connector ----------
-  // HttpStream connectors are leaf connectors; no FedBy use case, so the
-  // output tag is the upper bound `Tag`. The Connector's `id` is composed
-  // from the connector id + stream name so the StateStore key disambiguates.
+  // ---------- adapter to Stage ----------
 
-  /** Materialize this stream as a generic `Connector`, scoped by the given
-   *  connector id and version (which become the `Connector.id`/`version`). */
-  final def asConnector(connectorId: String, connectorVersion: String): Connector[Tag, Map[String, String], HttpExec] =
+  /** Materialize this stream as a [[Stage]], scoped by the given connector
+   *  id and version (which become the `Stage.id`/`version`). */
+  final def asStage(connectorId: String, connectorVersion: String)
+      : Stage[Parent, Out, Map[String, String], HttpExec] =
     val streamRef = this
-    new Connector[Tag, Map[String, String], HttpExec]:
+    new Stage[Parent, Out, Map[String, String], HttpExec]:
       val id           = s"${connectorId}_${streamRef.name}"
       val version      = connectorVersion
       val initialState = streamRef.initialState
       val codec        = HttpStream.mapCodec
       def reduce(a: Map[String, String], b: Map[String, String]): Map[String, String] = a ++ b
 
-      def dataStream(resume: Map[String, String]): ZStream[HttpExec, ExloError, Emission[Map[String, String]]] =
+      def run(
+          input:  ZStream[Any, ExloError, Parent],
+          resume: Map[String, String]
+      ): ZStream[HttpExec, ExloError, Emission[Out, Map[String, String]]] =
         // FullSync wipes the runner-loaded resume. Incremental honors it.
         val effectiveResume = streamRef.syncMode match
           case SyncMode.Incremental => resume
           case SyncMode.FullSync    => streamRef.initialState
 
         ZStream.unwrap {
-          Ref.make(streamRef.initialCtx).map { ctxRef =>
-            // Loop-state Option[State]: None means "stop after this iteration."
-            ZStream.unfoldChunkZIO[
-              HttpExec, ExloError, Emission[Map[String, String]], Option[Map[String, String]]
-            ](Some(effectiveResume)) {
-              case None => ZIO.none
-              case Some(state) =>
-                for
-                  ctx  <- ctxRef.get
-                  req   = streamRef.request(state, ctx)
-                  resp <- HttpExec.run(req)
-                  recs    = streamRef.records(state, ctx, resp)
-                  nState  = streamRef.nextState(state, ctx, resp)
-                  nCtx    = streamRef.nextCtx(state, ctx, resp)
-                  emissions = recs.map[Emission[Map[String, String]]](Emission.Record(_)) ++
-                              Chunk.fromIterable(
-                                nState.map(s => Emission.Mark(s): Emission[Map[String, String]])
-                              )
-                  nextStateValue = nState.getOrElse(state)
-                  next = nCtx match
-                    case Some(_) => Some(nextStateValue)  // continue
-                    case None    => None                  // stop after this batch
-                  _ <- nCtx.fold(ZIO.unit)(c => ctxRef.set(c))
-                yield Some((emissions, next))
+          // State is shared across parents within a run: Marks update it,
+          // subsequent iterations (and subsequent parent records) read the
+          // updated value on their next `request`.
+          Ref.make(effectiveResume).map { stateRef =>
+            input.flatMap { parent =>
+              ZStream.unwrap {
+                Ref.make(streamRef.initialCtx).map { ctxRef =>
+                  ZStream.unfoldChunkZIO[
+                    HttpExec, ExloError, Emission[Out, Map[String, String]], Boolean
+                  ](true) {
+                    case false => ZIO.none
+                    case true  =>
+                      for
+                        state <- stateRef.get
+                        ctx   <- ctxRef.get
+                        req    = streamRef.request(parent, state, ctx)
+                        resp  <- HttpExec.run(req)
+                        recs    = streamRef.records(parent, state, ctx, resp)
+                        nState  = streamRef.nextState(parent, state, ctx, resp)
+                        nCtx    = streamRef.nextCtx(parent, state, ctx, resp)
+                        emissions =
+                          recs.map[Emission[Out, Map[String, String]]](Emission.Record(_)) ++
+                          Chunk.fromIterable(
+                            nState.map(s => Emission.Mark(s): Emission[Out, Map[String, String]])
+                          )
+                        _ <- nState.fold(ZIO.unit)(s => stateRef.set(s))
+                        _ <- nCtx.fold(ZIO.unit)(c => ctxRef.set(c))
+                        continue = nCtx.isDefined
+                      yield Some((emissions, continue))
+                  }
+                }
+              }
             }
           }
         }

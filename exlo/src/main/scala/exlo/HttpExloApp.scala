@@ -16,15 +16,19 @@ import zio.http.Client
  *   - infrastructure (`s3Config`)
  *   - shared things at the connector level (auth, base URL, headers,
  *     retry policy) as plain `protected val`s
- *   - the streams the connector exposes (`streams: List[HttpStream]`)
+ *   - the streams the connector exposes (`streams: List[HttpStream[Unit, String]]`)
  *
  * Each runtime invocation runs ONE stream, selected via `EXLO_STREAM` env
  * var (or the equivalent `exlo.stream` config key). The framework looks up
- * the named stream, builds its `Connector`, and runs it via `Exlo.run`
- * with the canonical layer set: S3 data sink + S3 state store + S3 client +
+ * the named stream, builds its `Stage`, and runs it via `Exlo.run` with
+ * the canonical layer set: S3 data sink + S3 state store + S3 client +
  * `HttpExec.live` + zio-http `Client.default` + telemetry.
  *
- * Example — single-stream:
+ * Single-stream-shape only: every entry in `streams` is a root stream
+ * (`Parent = Unit`) emitting `String` records to the DataSink. Multi-stage
+ * connectors with parent/child wiring will use a different entry point.
+ *
+ * Example:
  *
  * {{{
  *   object PokeApi extends HttpExloApp:
@@ -32,11 +36,11 @@ import zio.http.Client
  *     val s3Config = S3Config(bucket = "my-data")
  *
  *     val streams = List(
- *       new HttpStream:
+ *       new HttpStream[Unit, String]:
  *         val name = "pokemon"
- *         def request(s, c)    = HttpExec.get(c.getOrElse("next", "https://pokeapi.co/api/v2/pokemon?offset=0"))
- *         def records(s, c, r) = r.json.field("results").flatMap(_.asArray).getOrElse(Chunk.empty).map(_.toJson)
- *         def nextCtx(s, c, r) = r.json.field("next").flatMap(_.asString).map(url => Map("next" -> url))
+ *         def request(p, s, c)    = HttpExec.get(c.getOrElse("next", "https://pokeapi.co/api/v2/pokemon?offset=0"))
+ *         def records(p, s, c, r) = r.json.field("results").flatMap(_.asArray).getOrElse(Chunk.empty).map(_.toJson)
+ *         def nextCtx(p, s, c, r) = r.json.field("next").flatMap(_.asString).map(url => Map("next" -> url))
  *     )
  * }}}
  */
@@ -49,7 +53,7 @@ trait HttpExloApp extends ZIOAppDefault:
 
   /** All streams this connector exposes. Operator selects one via
    *  `EXLO_STREAM` (or `exlo.stream` config key). */
-  def streams: List[HttpStream]
+  def streams: List[HttpStream[Unit, String]]
 
   override def run: ZIO[ZIOAppArgs & Scope, Any, Any] =
     val program = for
@@ -60,7 +64,7 @@ trait HttpExloApp extends ZIOAppDefault:
                         s"unknown stream '$streamName' for connector '$id'; " +
                           s"available: ${streams.map(_.name).mkString(", ")}"
                       ))
-      _ <- Exlo.run(selected.asConnector(id, version), streamName, flushPolicy)
+      _ <- Exlo.run(selected.asStage(id, version), streamName, flushPolicy)
     yield ()
 
     program.provide(
