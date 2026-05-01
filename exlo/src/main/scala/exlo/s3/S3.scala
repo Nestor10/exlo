@@ -1,4 +1,4 @@
-package exlo.runtime.s3
+package exlo.s3
 
 import software.amazon.awssdk.auth.credentials.{
   AwsBasicCredentials, DefaultCredentialsProvider, StaticCredentialsProvider

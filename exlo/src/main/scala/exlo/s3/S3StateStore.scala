@@ -1,4 +1,4 @@
-package exlo.runtime.s3
+package exlo.s3
 
 import exlo.domain.ExloError
 import exlo.runtime.{Filter, StateRow, StateStore}

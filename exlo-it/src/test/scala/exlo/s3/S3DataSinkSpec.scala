@@ -1,6 +1,6 @@
-package exlo.runtime.s3
+package exlo.s3
 
-import exlo.runtime.Sequenced
+import exlo.runtime.{RunContext, Sequenced}
 import software.amazon.awssdk.core.async.AsyncResponseTransformer
 import software.amazon.awssdk.services.s3.S3AsyncClient
 import software.amazon.awssdk.services.s3.model.{
@@ -16,18 +16,26 @@ import java.util.zip.GZIPInputStream
 
 object S3DataSinkSpec extends ZIOSpecDefault:
 
+  /** Wrap an effect in the RunContext FiberRefs the S3DataSink reads at write time. */
+  private def withCtx[R, E, A](
+      connectorId: String, streamName: String, syncId: String
+  )(zio: ZIO[R, E, A]): ZIO[R, E, A] =
+    RunContext.withRun(syncId, connectorId, "1.0.0") {
+      RunContext.streamName.locally(streamName)(zio)
+    }
+
   override def spec: Spec[TestEnvironment & Scope, Any] =
     suite("S3DataSink (MinIO)")(
       test("write produces a gzipped JSONL object containing the exlo envelope") {
         for
           s3        <- ZIO.service[S3AsyncClient]
           cfg       <- ZIO.service[S3Config]
-          sink      <- S3DataSink.make(cfg, "c1", "s1", "sync-1").provideEnvironment(ZEnvironment(s3))
+          sink      <- S3DataSink.make(cfg).provideEnvironment(ZEnvironment(s3))
           batch      = Chunk(
                          Sequenced(1, """{"id":1,"name":"alice"}"""),
                          Sequenced(2, """{"id":2,"name":"bob"}""")
                        )
-          durable   <- sink.write(batch)
+          durable   <- withCtx("c1", "s1", "sync-1")(sink.write(batch))
           listed    <- ZIO.fromCompletableFuture(s3.listObjectsV2(
                          ListObjectsV2Request.builder()
                            .bucket(cfg.bucket)
@@ -59,7 +67,6 @@ object S3DataSinkSpec extends ZIOSpecDefault:
           firstKey.contains("sync_id=sync-1"),
           decoded.size == 2,
           parsed.size == 2,
-          // Each parsed line is an object with our three envelope fields.
           parsed.forall(j => j.asObject.exists { obj =>
             obj.fields.exists(_._1 == "_exlo_ab_id") &&
             obj.fields.exists(_._1 == "_exlo_emitted_at") &&
@@ -71,9 +78,9 @@ object S3DataSinkSpec extends ZIOSpecDefault:
         for
           s3      <- ZIO.service[S3AsyncClient]
           cfg     <- ZIO.service[S3Config]
-          sink    <- S3DataSink.make(cfg, "c2", "s2", "sync-2").provideEnvironment(ZEnvironment(s3))
-          _       <- sink.write(Chunk(Sequenced(1, """{"a":1}""")))
-          _       <- sink.write(Chunk(Sequenced(2, """{"a":2}""")))
+          sink    <- S3DataSink.make(cfg).provideEnvironment(ZEnvironment(s3))
+          _       <- withCtx("c2", "s2", "sync-2")(sink.write(Chunk(Sequenced(1, """{"a":1}"""))))
+          _       <- withCtx("c2", "s2", "sync-2")(sink.write(Chunk(Sequenced(2, """{"a":2}"""))))
           listed  <- ZIO.fromCompletableFuture(s3.listObjectsV2(
                        ListObjectsV2Request.builder().bucket(cfg.bucket)
                          .prefix(s"${cfg.prefix}/data/connector=c2/").build()

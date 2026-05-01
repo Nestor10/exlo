@@ -1,4 +1,4 @@
-package exlo.runtime.s3
+package exlo.s3
 
 import org.testcontainers.containers.MinIOContainer
 import org.testcontainers.utility.DockerImageName

@@ -1,7 +1,7 @@
-package exlo.runtime.s3
+package exlo.s3
 
 import exlo.domain.ExloError
-import exlo.runtime.{DataSink, Sequenced}
+import exlo.runtime.{DataSink, RunContext, Sequenced}
 import software.amazon.awssdk.core.async.AsyncRequestBody
 import software.amazon.awssdk.services.s3.S3AsyncClient
 import software.amazon.awssdk.services.s3.model.PutObjectRequest
@@ -34,25 +34,34 @@ import java.util.zip.GZIPOutputStream
  * + acquireRelease guarantee cleanup even on interrupt.
  */
 final class S3DataSink private (
-    s3:          S3AsyncClient,
-    config:      S3Config,
-    connectorId: String,
-    streamName:  String,
-    syncId:      String,
-    flushSeq:    Ref[Long]
+    s3:       S3AsyncClient,
+    config:   S3Config,
+    flushSeq: Ref[Long]
 ) extends DataSink:
 
+  /**
+   * `connectorId`, `streamName`, and `syncId` are read from [[RunContext]]
+   * FiberRefs at write time. The framework's entry point ([[exlo.Exlo.run]])
+   * sets them via `RunContext.withRun` for the duration of the run; tests
+   * must set them explicitly via `RunContext.withRun` and
+   * `RunContext.streamName.locally` before calling `write`.
+   */
   def write(batch: Chunk[Sequenced]): IO[ExloError, Long] =
     if batch.isEmpty then ZIO.succeed(0L)
     else
-      ZIO.scoped {
-        for
-          tempFile <- acquireTempFile
-          _        <- writeBatch(tempFile, batch)
-          n        <- flushSeq.updateAndGet(_ + 1L)
-          _        <- uploadFile(tempFile, pathFor(n))
-        yield batch.map(_.seq).max
-      }
+      for
+        syncId      <- RunContext.syncId.get
+        connectorId <- RunContext.connectorId.get
+        streamName  <- RunContext.streamName.get
+        n           <- flushSeq.updateAndGet(_ + 1L)
+        result      <- ZIO.scoped {
+                         for
+                           tempFile <- acquireTempFile
+                           _        <- writeBatch(tempFile, batch)
+                           _        <- uploadFile(tempFile, pathFor(connectorId, streamName, syncId, n))
+                         yield batch.map(_.seq).max
+                       }
+      yield result
 
   private def acquireTempFile: ZIO[Scope, ExloError, Path] =
     ZIO.acquireRelease(
@@ -89,7 +98,7 @@ final class S3DataSink private (
       )
     ).mapError(wrap).unit
 
-  private def pathFor(flushSeq: Long): String =
+  private def pathFor(connectorId: String, streamName: String, syncId: String, flushSeq: Long): String =
     f"${config.prefix.stripSuffix("/")}/data/connector=$connectorId/stream=$streamName/sync_id=$syncId/part-$flushSeq%08d.jsonl.gz"
 
   private def wrap(t: Throwable): ExloError =
@@ -98,13 +107,11 @@ final class S3DataSink private (
 
 object S3DataSink:
 
-  def make(
-      config:      S3Config,
-      connectorId: String,
-      streamName:  String,
-      syncId:      String
-  ): ZIO[S3AsyncClient, Nothing, S3DataSink] =
+  def make(config: S3Config): ZIO[S3AsyncClient, Nothing, S3DataSink] =
     for
       s3       <- ZIO.service[S3AsyncClient]
       flushSeq <- Ref.make(0L)
-    yield new S3DataSink(s3, config, connectorId, streamName, syncId, flushSeq)
+    yield new S3DataSink(s3, config, flushSeq)
+
+  def layer(config: S3Config): ZLayer[S3AsyncClient, Nothing, DataSink] =
+    ZLayer.fromZIO(make(config).map(s => s: DataSink))

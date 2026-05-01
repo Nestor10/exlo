@@ -1,4 +1,4 @@
-package exlo.runtime.s3
+package exlo.s3
 
 /**
  * Configuration for the S3-backed [[exlo.runtime.s3.S3DataSink]] and

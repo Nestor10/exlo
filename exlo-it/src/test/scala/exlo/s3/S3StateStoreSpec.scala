@@ -1,4 +1,4 @@
-package exlo.runtime.s3
+package exlo.s3
 
 import exlo.runtime.{Filter, StateRow, StateStore}
 import software.amazon.awssdk.services.s3.S3AsyncClient
