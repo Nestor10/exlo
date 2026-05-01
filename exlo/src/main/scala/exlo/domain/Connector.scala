@@ -12,11 +12,20 @@ import zio.stream.ZStream
  * No env-service plumbing, no `Throwable` in the error channel, no side
  * channels for output.
  *
+ * Type parameters:
+ *   - [[O]]: phantom tag identifying this connector's output. Lets a child
+ *     connector consume from several parents at once via distinct
+ *     `Source[T <: Tag]` services. `O` is a type parameter (not a type member)
+ *     so that ZIO's runtime `Tag` derivation can see it through the signature
+ *     — `Source[parent.Out]` would be path-dependent and unreachable to the
+ *     env-lookup machinery. Use `Tag` directly (the upper bound) for leaf
+ *     connectors that aren't intended to feed any child.
+ *   - `S`: state shape. Encoded for StateStore via [[codec]]; combined across
+ *     marks via [[reduce]].
+ *   - `R`: env requirement.
+ *
  * Five things a connector author provides:
  *
- *   - [[Out]]: phantom tag identifying this connector's output. Lets a child
- *     connector consume from several parents at once via distinct
- *     `Source[T <: Tag]` services.
  *   - [[initialState]]: cold-start state, used by the runner when nothing is
  *     committed in the StateStore.
  *   - [[reduce]]: a semigroup on `S`, used at every flush boundary to fold
@@ -29,10 +38,7 @@ import zio.stream.ZStream
  *   - [[dataStream]]: produces records and resume-point marks given a resume
  *     point. Pure value; testable by `runCollect`-ing the stream.
  */
-trait Connector[S, -R]:
-
-  /** Phantom tag for this connector's output. See [[Tag]]. */
-  type Out <: Tag
+trait Connector[+O <: Tag, S, -R]:
 
   /** Stable identifier; used for logs, metrics, and StateStore key prefixes. */
   def id: String
