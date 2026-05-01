@@ -8,9 +8,10 @@ val zioOtelVersion   = "4.0.0-RC11"
 val otelSdkVersion   = "1.61.0"
 val otelInstrVersion = "2.20.0-alpha"
 val awsVersion       = "2.37.2"
+val testcontainersVersion = "1.20.4"
 
 lazy val root = (project in file("."))
-  .aggregate(exlo)
+  .aggregate(exlo, exloIt)
   .settings(
     name           := "exlo-root",
     publish / skip := true
@@ -61,12 +62,33 @@ lazy val exlo = project
       // Testing
       "dev.zio" %% "zio-test"          % zioVersion     % Test,
       "dev.zio" %% "zio-test-sbt"      % zioVersion     % Test,
-      "dev.zio" %% "zio-http-testkit"  % zioHttpVersion % Test,
+      "dev.zio" %% "zio-http-testkit"  % zioHttpVersion % Test
+    ),
+    testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
 
-      // Testcontainers for S3 integration tests against MinIO.
-      "com.dimafeng"      %% "testcontainers-scala-core" % "0.41.4" % Test,
-      "org.testcontainers" % "testcontainers"            % "1.20.4" % Test,
-      "org.testcontainers" % "minio"                     % "1.20.4" % Test
+    Test / fork := true
+  )
+
+/**
+ * Integration tests. Anything that needs Docker (testcontainers — MinIO,
+ * etc.) lives here so `sbt exlo/test` stays fast and dependency-free for
+ * the inner loop. Run integration tests via `sbt exloIt/test` or
+ * `sbt test` (which aggregates both).
+ */
+lazy val exloIt = project
+  .in(file("exlo-it"))
+  .dependsOn(exlo % "compile->compile;test->test")
+  .settings(
+    name           := "exlo-it",
+    version        := "0.2.0-SNAPSHOT",
+    scalaVersion   := scala3Version,
+    publish / skip := true,
+    libraryDependencies ++= Seq(
+      "dev.zio"           %% "zio-test"                   % zioVersion              % Test,
+      "dev.zio"           %% "zio-test-sbt"               % zioVersion              % Test,
+      "com.dimafeng"      %% "testcontainers-scala-core"  % "0.41.4"                % Test,
+      "org.testcontainers" % "testcontainers"             % testcontainersVersion   % Test,
+      "org.testcontainers" % "minio"                      % testcontainersVersion   % Test
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
 
