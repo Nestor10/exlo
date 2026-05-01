@@ -6,7 +6,7 @@ import software.amazon.awssdk.core.async.{AsyncRequestBody, AsyncResponseTransfo
 import software.amazon.awssdk.services.s3.S3AsyncClient
 import software.amazon.awssdk.services.s3.model.{
   GetObjectRequest, GetObjectResponse, ListObjectsV2Request,
-  NoSuchKeyException, PutObjectRequest, S3Object
+  NoSuchKeyException, PutObjectRequest, S3Exception, S3Object
 }
 import zio.*
 import zio.json.*
@@ -23,10 +23,13 @@ import java.time.Instant
  *
  * Semantics:
  *   - readByKey: GET object; absent → `None`.
- *   - merge: read existing, compare `(committedAt, syncId)`, PUT only if
- *     newer. Race-tolerant by last-write-wins; v1 accepts a small race
- *     window if two writers compete for the same key. Conditional puts
- *     (If-Match / If-None-Match) are a future improvement.
+ *   - merge: read existing (with ETag), compare `(committedAt, syncId)`,
+ *     PUT only if newer. The PUT uses S3 conditional writes — `If-Match`
+ *     against the ETag we read, or `If-None-Match: *` when no object yet
+ *     existed. On a 412 PreconditionFailed (someone else wrote first),
+ *     the merge re-reads and retries up to 5 times. This makes the merge
+ *     truly atomic single-writer-wins under contention; no documented
+ *     race window.
  *   - scan(ByKey): one filtered list-and-get.
  *   - scan(Tail(n)): list objects, fetch each, sort by
  *     `(committedAt, syncId)` desc, take n. Acceptable memory-bound for
@@ -49,13 +52,32 @@ final class S3StateStore(s3: S3AsyncClient, config: S3Config) extends StateStore
 
   def merge(row: StateRow): IO[ExloError, Unit] =
     val k = keyPath(row.connector, row.stream, row.key)
-    for
-      existing <- getObjectAsString(k).map(_.flatMap(_.fromJson[StateRow].toOption))
-      shouldWrite = existing match
-                      case None       => true
-                      case Some(prev) => isNewer(row, prev)
-      _ <- ZIO.when(shouldWrite)(putObject(k, row.toJson))
-    yield ()
+
+    val attempt: IO[ExloError, Unit] = getObjectWithEtag(k).flatMap {
+      case None =>
+        // No object yet — succeed only if no other writer beats us to it.
+        putConditional(k, row.toJson, ifMatch = None, ifNoneMatch = Some("*"))
+      case Some((bodyStr, etag)) =>
+        ZIO.fromEither(bodyStr.fromJson[StateRow])
+          .mapError(decodeError(k, _))
+          .flatMap { prev =>
+            if isNewer(row, prev) then
+              // Succeed only if the object hasn't changed since we read it.
+              putConditional(k, row.toJson, ifMatch = Some(etag), ifNoneMatch = None)
+            else
+              ZIO.unit  // we're not newer; nothing to do
+          }
+    }
+
+    // On 412 PreconditionFailed (another writer beat us), re-read and retry.
+    // Bounded to keep an unrelated bug from looping forever; in practice
+    // contention should resolve in 1-2 retries.
+    attempt.retry(
+      Schedule.recurWhile[ExloError] {
+        case ExloError.StorageError(_, cause: S3Exception) => cause.statusCode == 412
+        case _                                              => false
+      } && Schedule.recurs(5)
+    )
 
   def scan(connector: String, stream: String, filter: Filter[String]):
       ZStream[Any, ExloError, StateRow] =
@@ -97,13 +119,38 @@ final class S3StateStore(s3: S3AsyncClient, config: S3Config) extends StateStore
       bytes => ZIO.succeed(Some(bytes.asUtf8String()))
     )
 
-  private def putObject(key: String, body: String): IO[ExloError, Unit] =
+  /** GET the object body alongside its ETag. None if the object doesn't exist. */
+  private def getObjectWithEtag(key: String): IO[ExloError, Option[(String, String)]] =
     ZIO.fromCompletableFuture(
-      s3.putObject(
-        PutObjectRequest.builder().bucket(config.bucket).key(key).build(),
-        AsyncRequestBody.fromString(body)
+      s3.getObject(
+        GetObjectRequest.builder().bucket(config.bucket).key(key).build(),
+        AsyncResponseTransformer.toBytes[GetObjectResponse]()
       )
-    ).mapError(t =>
+    ).foldZIO(
+      {
+        case _: NoSuchKeyException => ZIO.none
+        case t                     =>
+          ZIO.fail(ExloError.StorageError(s"S3StateStore.get($key): ${t.getMessage}", t))
+      },
+      bytes => ZIO.succeed(Some((bytes.asUtf8String(), bytes.response.eTag)))
+    )
+
+  /** Conditional PUT. `ifMatch` requires the existing ETag to match;
+   *  `ifNoneMatch = "*"` requires no object to exist at the key. Failures
+   *  with status 412 (PreconditionFailed) bubble up so `merge`'s retry
+   *  can detect the conflict and re-read. */
+  private def putConditional(
+      key:         String,
+      body:        String,
+      ifMatch:     Option[String],
+      ifNoneMatch: Option[String]
+  ): IO[ExloError, Unit] =
+    ZIO.fromCompletableFuture {
+      val builder0 = PutObjectRequest.builder().bucket(config.bucket).key(key)
+      val builder1 = ifMatch.fold(builder0)(builder0.ifMatch)
+      val builder2 = ifNoneMatch.fold(builder1)(builder1.ifNoneMatch)
+      s3.putObject(builder2.build(), AsyncRequestBody.fromString(body))
+    }.mapError(t =>
       ExloError.StorageError(s"S3StateStore.put($key): ${t.getMessage}", t)
     ).unit
 

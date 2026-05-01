@@ -79,5 +79,27 @@ object S3StateStoreSpec extends ZIOSpecDefault:
           tail.size == 3,
           tail.map(_.value).toList == List("5", "4", "3")
         )
+      },
+      test("concurrent merges to the same key all succeed; newest by (committedAt, syncId) wins") {
+        // 20 fibers race on the same (connector, stream, key). Conditional
+        // PUT means each will hit at least one 412; the merge's retry loop
+        // must transparently re-read and either skip (if not newer) or
+        // re-PUT (if newer). All fibers must complete without error, and
+        // the final stored value must be the row with the largest
+        // (committedAt, syncId).
+        val n = 20
+        for
+          s3   <- ZIO.service[S3AsyncClient]
+          cfg  <- ZIO.service[S3Config]
+          ss    = new S3StateStore(s3, cfg)
+          rows  = (1 to n).map(i =>
+                    row(connector = "race", value = s"v$i",
+                        committedAt = at(i), syncId = f"sync-$i%03d")
+                  )
+          _    <- ZIO.foreachParDiscard(rows)(ss.merge)
+          got  <- ss.readByKey("race", rows.head.stream, rows.head.key)
+        yield assertTrue(
+          got.exists(_.value == s"v$n")  // last-by-committedAt wins
+        )
       }
     ).provideLayerShared(MinioFixture.layer.orDie) @@ TestAspect.withLiveClock
