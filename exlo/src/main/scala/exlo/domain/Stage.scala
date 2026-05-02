@@ -44,7 +44,12 @@ import zio.stream.ZStream
  */
 trait Stage[-I, +O, S, -R]:
 
-  /** Stable identifier; used for logs, metrics, and StateStore key prefixes. */
+  /** This stage's intrinsic name — the "stream" within a connector
+   *  (e.g., `"queries"`, `"mentions"`). Used as the `stream` slot in
+   *  StateStore keys, in S3 path `stream=<id>` segments, and in
+   *  log/trace annotations. NOT prefixed with the connector id; the
+   *  connector id is a separate runtime concern carried through
+   *  [[exlo.Exlo.run]]/`runChain` and `RunContext.connectorId`. */
   def id: String
 
   /** Semantic version; used for debugging and reproducibility. */
@@ -68,8 +73,15 @@ trait Stage[-I, +O, S, -R]:
    * the StateStore on start (falling back to [[initialState]] on cold start)
    * and feeds the `input` stream — `ZStream.succeed(())` for roots, the
    * upstream stage's record stream otherwise.
+   *
+   * `R0` is the input stream's env; method-local so the class can keep
+   * `-R` contravariance. The result needs `R & R0` (this stage's env plus
+   * whatever the upstream stream brought along). For roots the input is
+   * `ZStream[Any, ...]` so `R & Any = R`; for chains the upstream stage
+   * typically shares this stage's `R` (e.g., both need `HttpExec`) and
+   * `R & R = R`.
    */
-  def run(
-      input:  ZStream[Any, ExloError, I],
+  def run[R0](
+      input:  ZStream[R0, ExloError, I],
       resume: S
-  ): ZStream[R, ExloError, Emission[O, S]]
+  ): ZStream[R & R0, ExloError, Emission[O, S]]

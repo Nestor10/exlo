@@ -62,7 +62,11 @@ object Telemetry:
    *
    * Telemetry must never kill the app: every failure path returns a working Tracer.
    */
-  val auto: TaskLayer[Tracer] = select(sys.env.get)
+  // `lazy` because `select` may resolve to `liveOrNoop`, which is declared
+  // below this point. With an eager val, in environments where OTEL is
+  // configured at startup, `liveOrNoop` is still null when `auto` reads it,
+  // surfacing as an NPE inside ZLayer.MemoMap on layer composition.
+  lazy val auto: TaskLayer[Tracer] = select(sys.env.get)
 
   /**
    * Selector exposed for tests. Lookup is a function so callers can substitute a fixed map
@@ -73,8 +77,10 @@ object Telemetry:
     val disabled = getEnv("OTEL_SDK_DISABLED").exists(_.equalsIgnoreCase("true"))
     if endpoint && !disabled then liveOrNoop else noop
 
-  /** `live` with a WARN log on init failure, then `noop` so the run continues. */
-  private val liveOrNoop: TaskLayer[Tracer] =
+  /** `live` with a WARN log on init failure, then `noop` so the run continues.
+   *  `lazy` so `auto`'s call to `select` doesn't observe a null reference
+   *  during object init (see comment on `auto`). */
+  private lazy val liveOrNoop: TaskLayer[Tracer] =
     live.tapErrorCause(c =>
       ZIO.logWarningCause(
         "OpenTelemetry SDK init failed; falling back to noop tracer. " +

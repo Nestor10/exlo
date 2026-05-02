@@ -11,6 +11,7 @@ import zio.json.ast.Json
 
 import java.io.{BufferedWriter, FileOutputStream, OutputStreamWriter}
 import java.nio.file.{Files, Path}
+import java.time.{ZoneOffset, LocalDate}
 import java.util.UUID
 import java.util.zip.GZIPOutputStream
 
@@ -26,7 +27,13 @@ import java.util.zip.GZIPOutputStream
  *   }
  *
  * Path layout:
- *   s3://{bucket}/{prefix}/data/connector={id}/stream={s}/sync_id={syncId}/part-NN.jsonl.gz
+ *   s3://{bucket}/{prefix}/data/connector={id}/stream={s}/date={YYYY-MM-DD}/sync_id={syncId}/part-NN.jsonl.gz
+ *
+ * The `date=` partition is the UTC date of the *batch write* (not the
+ * sync start). A run that straddles midnight produces objects under two
+ * date partitions; that's correct alignment for downstream "what landed
+ * today" queries. Compatible with Hive/Athena/Spark partition discovery
+ * out of the box.
  *
  * Lifecycle: per `write` we acquire a tempfile + GZIP writer (scoped),
  * stream-write the batch, upload the tempfile via PutObject, and the scope
@@ -54,12 +61,25 @@ final class S3DataSink private (
         connectorId <- RunContext.connectorId.get
         streamName  <- RunContext.streamName.get
         n           <- flushSeq.updateAndGet(_ + 1L)
+        date        <- Clock.instant.map(_.atZone(ZoneOffset.UTC).toLocalDate)
+        objectKey    = pathFor(connectorId, streamName, date, syncId, n)
         result      <- ZIO.scoped {
                          for
                            tempFile <- acquireTempFile
                            _        <- writeBatch(tempFile, batch)
-                           _        <- uploadFile(tempFile, pathFor(connectorId, streamName, syncId, n))
+                           _        <- uploadFile(tempFile, objectKey)
                          yield batch.map(_.seq).max
+                       }
+        _           <- ZIO.logAnnotate("event", "data.write") {
+                         ZIO.logAnnotate("s3_bucket", config.bucket) {
+                           ZIO.logAnnotate("s3_key", objectKey) {
+                             ZIO.logAnnotate("records", batch.size.toString) {
+                               ZIO.logAnnotate("durable_seq", result.toString) {
+                                 ZIO.logInfo("data file uploaded")
+                               }
+                             }
+                           }
+                         }
                        }
       yield result
 
@@ -98,8 +118,8 @@ final class S3DataSink private (
       )
     ).mapError(wrap).unit
 
-  private def pathFor(connectorId: String, streamName: String, syncId: String, flushSeq: Long): String =
-    f"${config.prefix.stripSuffix("/")}/data/connector=$connectorId/stream=$streamName/sync_id=$syncId/part-$flushSeq%08d.jsonl.gz"
+  private def pathFor(connectorId: String, streamName: String, date: LocalDate, syncId: String, flushSeq: Long): String =
+    f"${config.prefix.stripSuffix("/")}/data/connector=$connectorId/stream=$streamName/date=$date/sync_id=$syncId/part-$flushSeq%08d.jsonl.gz"
 
   private def wrap(t: Throwable): ExloError =
     ExloError.StorageError(s"S3DataSink: ${t.getMessage}", t)

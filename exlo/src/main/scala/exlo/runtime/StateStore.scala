@@ -66,8 +66,16 @@ trait StateStore:
 
 object StateStore:
 
-  /** Sentinel key used by the watermark adapter when state is global per stream. */
-  val WatermarkKey: String = "$watermark$"
+  /** Sentinel key used by the watermark adapter when state is global per
+   *  stream. Plain `"watermark"` so the StateStore object key reads cleanly
+   *  without URL-encoding cruft (`key=watermark.json`).
+   *
+   *  User-supplied keys (in future per-key state shapes) should be safe
+   *  for use as URI components — alphanumerics, `_`, `-`, `.` — to avoid
+   *  encoding cruft in the S3 path. The store still URL-encodes
+   *  defensively but you'll regret it if you stuff slashes in.
+   */
+  val WatermarkKey: String = "watermark"
 
   /**
    * In-memory test impl. Backed by a single Ref keyed by
@@ -109,6 +117,11 @@ object StateStore:
   object InMemory:
     def make: UIO[InMemory] =
       Ref.make(Map.empty[(String, String, String), StateRow]).map(new InMemory(_))
+
+    /** ZLayer factory for using InMemory as a drop-in StateStore. Used by
+     *  the logging-destination path in [[exlo.HttpExloApp]] (no durability,
+     *  state evaporates on exit — fine for dev mode). */
+    val layer: ULayer[StateStore] = ZLayer.fromZIO(make)
 
   private def newerThan(a: StateRow, b: StateRow): Boolean =
     val cmp = a.committedAt.compareTo(b.committedAt)

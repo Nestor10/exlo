@@ -66,7 +66,9 @@ lazy val exlo = project
     ),
     testFrameworks += new TestFramework("zio.test.sbt.ZTestFramework"),
 
-    Test / fork := true
+    Test / fork := true,
+
+    Compile / doc / sources := Seq.empty
   )
 
 /**

@@ -28,6 +28,25 @@ trait DataSink:
 object DataSink:
 
   /**
+   * Dev-mode sink: writes each record's value to ZIO logs at INFO,
+   * returns the highest seq# in the batch as the durable watermark.
+   * Records are never persisted; on restart, every state mark replays.
+   *
+   * Layered via [[loggingLayer]]; gated by `EXLO_DESTINATION=logging`
+   * in [[exlo.HttpExloApp]] so a connector can run end-to-end without
+   * S3 (or any other substrate) configured.
+   */
+  val logging: DataSink = new DataSink:
+    def write(batch: Chunk[Sequenced]): IO[ExloError, Long] =
+      if batch.isEmpty then ZIO.succeed(0L)
+      else
+        ZIO.foreachDiscard(batch)(s =>
+          ZIO.logInfo(s"[record seq=${s.seq}] ${s.value}")
+        ).as(batch.map(_.seq).max)
+
+  val loggingLayer: ULayer[DataSink] = ZLayer.succeed(logging)
+
+  /**
    * In-memory test sink. Accumulates every record across every write; assert
    * the collected stream from tests via [[InMemory.collected]].
    */

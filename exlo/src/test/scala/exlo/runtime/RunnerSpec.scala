@@ -13,21 +13,21 @@ object RunnerSpec extends ZIOSpecDefault:
 
   /** Synthetic Long-state leaf stage. `reduce` is `max`. */
   private def stage(
-      cid:       String,
+      streamId:  String,
       emissions: ZStream[Any, ExloError, Emission[String, Long]],
       initial:   Long = 0L,
       onResume:  Long => UIO[Unit] = _ => ZIO.unit
   ): Stage[Unit, String, Long, Any] =
     new Stage[Unit, String, Long, Any]:
-      val id           = cid
+      val id           = streamId
       val version      = "1.0.0"
       val initialState = initial
       def reduce(a: Long, b: Long): Long = a max b
       val codec        = Codec.long
-      def run(
-          input:  ZStream[Any, ExloError, Unit],
+      def run[R0](
+          input:  ZStream[R0, ExloError, Unit],
           resume: Long
-      ): ZStream[Any, ExloError, Emission[String, Long]] =
+      ): ZStream[Any & R0, ExloError, Emission[String, Long]] =
         ZStream.fromZIO(onResume(resume)).drain ++ emissions
 
   private val fastFlush = FlushPolicy(maxRows = 100, maxInterval = 100.millis)
@@ -42,7 +42,7 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", emissions), "s1", "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", emissions), "sync-1", sink, store, fastFlush)
         rows   <- sink.collected
         sz     <- store.size
       yield assertTrue(
@@ -59,7 +59,7 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", emissions), "s1", "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", emissions), "sync-1", sink, store, fastFlush)
         got    <- store.readByKey("c1", "s1", StateStore.WatermarkKey)
       yield assertTrue(got.exists(_.value == "7"))
     },
@@ -75,7 +75,7 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", emissions), "s1", "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", emissions), "sync-1", sink, store, fastFlush)
         got    <- store.readByKey("c1", "s1", StateStore.WatermarkKey)
       yield assertTrue(got.exists(_.value == "10"))
     },
@@ -89,8 +89,9 @@ object RunnerSpec extends ZIOSpecDefault:
                            Instant.parse("2026-01-01T00:00:00Z"), "prior-sync")
         _      <- store.merge(seed)
         _      <- Runner.run(
-                    stage("c1", emissions, onResume = v => seen.succeed(v).unit),
-                    "s1", "sync-2", sink, store, fastFlush
+                    "c1",
+                    stage("s1", emissions, onResume = v => seen.succeed(v).unit),
+                    "sync-2", sink, store, fastFlush
                   )
         got    <- seen.await
       yield assertTrue(got == 42L)
@@ -102,7 +103,7 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", emissions), "s1", "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", emissions), "sync-1", sink, store, fastFlush)
         got    <- store.readByKey("c1", "s1", StateStore.WatermarkKey)
       yield assertTrue(got.exists(_.value == "99"))
     },
@@ -110,7 +111,7 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", ZStream.empty), "s1", "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", ZStream.empty), "sync-1", sink, store, fastFlush)
         rows   <- sink.collected
         sz     <- store.size
       yield assertTrue(rows.isEmpty, sz == 0)
@@ -127,8 +128,8 @@ object RunnerSpec extends ZIOSpecDefault:
       for
         sink   <- DataSink.InMemory.make
         store  <- StateStore.InMemory.make
-        _      <- Runner.run(stage("c1", firstRun),  "s1", "sync-1", sink, store, fastFlush)
-        _      <- Runner.run(stage("c1", secondRun), "s1", "sync-2", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", firstRun),  "sync-1", sink, store, fastFlush)
+        _      <- Runner.run("c1", stage("s1", secondRun), "sync-2", sink, store, fastFlush)
         got    <- store.readByKey("c1", "s1", StateStore.WatermarkKey)
       yield assertTrue(got.exists(_.value == "7"))
     }

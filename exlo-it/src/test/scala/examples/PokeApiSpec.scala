@@ -68,8 +68,9 @@ object PokeApiSpec extends ZIOSpecDefault:
           sink  <- DataSink.InMemory.make
           store <- StateStore.InMemory.make
           _     <- Runner.run(
-                     PokeStream.asStage("pokeapi", "1.0.0"),
-                     "pokemon", "test-sync",
+                     "pokeapi",
+                     PokeStream.asStage("1.0.0"),
+                     "test-sync",
                      sink, store,
                      FlushPolicy(maxRows = 100, maxInterval = 100.millis)
                    )

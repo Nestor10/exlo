@@ -47,6 +47,25 @@ trait HttpStream[-Parent, +Out]:
   // ---------- behavior config ----------
   def syncMode: SyncMode = SyncMode.Incremental
 
+  /**
+   * Number of parent records processed concurrently. Default `1`
+   * (sequential — safe for any HttpStream). Set higher to fan out
+   * per-parent walks: e.g., brandwatch's mentions stream sets
+   * `parallelism = 4` to fetch mentions for 4 queries at once.
+   *
+   * Concurrency invariants:
+   *   - State (the shared `Ref[Map]`) is updated atomically; each Mark's
+   *     `state ++ next` is a CAS, so concurrent updates can't lose data.
+   *   - Marks emitted from different parents are serialized by the
+   *     runner's `WatermarkTracker` based on emission seq#; they fold via
+   *     `reduce` in seq order, so commit semantics are unchanged.
+   *   - Parents whose state keys overlap WILL race on the value (last
+   *     CAS wins). Use disjoint keys per parent (e.g., namespace by
+   *     `<queryId>` like brandwatch's `cursor_<queryId>`) when running
+   *     parallel.
+   */
+  def parallelism: Int = 1
+
   // ---------- data slots ----------
   def initialState: Map[String, String] = Map.empty
   def initialCtx:   Map[String, String] = Map.empty
@@ -64,22 +83,23 @@ trait HttpStream[-Parent, +Out]:
 
   // ---------- adapter to Stage ----------
 
-  /** Materialize this stream as a [[Stage]], scoped by the given connector
-   *  id and version (which become the `Stage.id`/`version`). */
-  final def asStage(connectorId: String, connectorVersion: String)
+  /** Materialize this stream as a [[Stage]]. The Stage's `id` is just the
+   *  stream's intrinsic name (e.g., `"mentions"`); the connector id is
+   *  carried separately through `Exlo.run` / `RunContext.connectorId`. */
+  final def asStage(connectorVersion: String)
       : Stage[Parent, Out, Map[String, String], HttpExec] =
     val streamRef = this
     new Stage[Parent, Out, Map[String, String], HttpExec]:
-      val id           = s"${connectorId}_${streamRef.name}"
+      val id           = streamRef.name
       val version      = connectorVersion
       val initialState = streamRef.initialState
       val codec        = HttpStream.mapCodec
       def reduce(a: Map[String, String], b: Map[String, String]): Map[String, String] = a ++ b
 
-      def run(
-          input:  ZStream[Any, ExloError, Parent],
+      def run[R0](
+          input:  ZStream[R0, ExloError, Parent],
           resume: Map[String, String]
-      ): ZStream[HttpExec, ExloError, Emission[Out, Map[String, String]]] =
+      ): ZStream[HttpExec & R0, ExloError, Emission[Out, Map[String, String]]] =
         // FullSync wipes the runner-loaded resume. Incremental honors it.
         val effectiveResume = streamRef.syncMode match
           case SyncMode.Incremental => resume
@@ -90,7 +110,7 @@ trait HttpStream[-Parent, +Out]:
           // subsequent iterations (and subsequent parent records) read the
           // updated value on their next `request`.
           Ref.make(effectiveResume).map { stateRef =>
-            input.flatMap { parent =>
+            input.flatMapPar(streamRef.parallelism) { parent =>
               ZStream.unwrap {
                 Ref.make(streamRef.initialCtx).map { ctxRef =>
                   ZStream.unfoldChunkZIO[
